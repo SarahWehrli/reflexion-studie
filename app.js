@@ -52,19 +52,21 @@ function apiError(status, msg) {
   const e = new Error((map[status] || ('API-Fehler ' + status)) + (msg ? ' (' + msg + ')' : ''));
   e.status = status; return e;
 }
-async function callClaude({ system, messages, maxTokens, onDelta }) {
+async function callClaude({ system, messages, maxTokens, onDelta, onStatus, webSearch }) {
   if (!API_KEY) throw new Error('Kein API-Key im Speicher. Bitte Seite neu laden und Key eingeben.');
   let res;
   try {
     res = await fetch(API_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify(Object.assign({ model: C.MODEL, max_tokens: maxTokens, messages, stream: true }, system ? { system } : {}))
+      body: JSON.stringify(Object.assign({ model: C.MODEL, max_tokens: maxTokens, messages, stream: true },
+        system ? { system } : {}, C.EFFORT ? { output_config: { effort: C.EFFORT } } : {}, C.THINKING ? { thinking: { type: C.THINKING } } : {},
+        webSearch && C.WEB_SEARCH ? { tools: [{ type: C.WEB_SEARCH.type, name: 'web_search', max_uses: C.WEB_SEARCH.max_uses }] } : {}))
     });
   } catch (e) { throw new Error('Netzwerkfehler oder vom Browser blockiert (CORS). Siehe README, Abschnitt «Lokaler Server».'); }
   if (!res.ok) { let m = ''; try { const j = await res.json(); m = (j.error && j.error.message) || ''; } catch (e) { /* ignorieren */ } throw apiError(res.status, m); }
   const reader = res.body.getReader(); const dec = new TextDecoder();
-  let buf = '', text = '', stop = null; const usage = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+  let buf = '', text = '', stop = null; const usage = { input: 0, output: 0, cache_read: 0, cache_write: 0, web_searches: 0 }; const blocks = {}; const searches = [];
   for (;;) {
     const { done, value } = await reader.read(); if (done) break;
     buf += dec.decode(value, { stream: true }).replace(/\r\n/g, '\n');
@@ -74,12 +76,20 @@ async function callClaude({ system, messages, maxTokens, onDelta }) {
       const line = raw.split('\n').find(l => l.startsWith('data:')); if (!line) continue;
       let ev; try { ev = JSON.parse(line.slice(5).trim()); } catch (e) { continue; }
       if (ev.type === 'message_start' && ev.message && ev.message.usage) { const u = ev.message.usage; usage.input = u.input_tokens || 0; usage.cache_read = u.cache_read_input_tokens || 0; usage.cache_write = u.cache_creation_input_tokens || 0; }
+      else if (ev.type === 'content_block_start' && ev.content_block) { const b = ev.content_block; blocks[ev.index] = { type: b.type, json: '' };
+        if (b.type === 'thinking' || b.type === 'redacted_thinking') { if (onStatus && !text) onStatus('denkt nach …'); }
+        else if (b.type === 'server_tool_use') { if (onStatus) onStatus('sucht im Web …'); }
+        else if (b.type === 'text' && text && !/\n$/.test(text)) { text += '\n\n'; } }
       else if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta') { text += ev.delta.text; if (onDelta) onDelta(text); }
-      else if (ev.type === 'message_delta') { if (ev.usage) usage.output = ev.usage.output_tokens || usage.output; if (ev.delta && ev.delta.stop_reason) stop = ev.delta.stop_reason; }
+      else if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'input_json_delta' && blocks[ev.index]) { blocks[ev.index].json += ev.delta.partial_json || ''; }
+      else if (ev.type === 'content_block_stop' && blocks[ev.index] && blocks[ev.index].type === 'server_tool_use') { try { const q = JSON.parse(blocks[ev.index].json || '{}').query; if (q) searches.push(q); } catch (e) { /* ignorieren */ } }
+      else if (ev.type === 'message_delta') { if (ev.usage) { usage.output = ev.usage.output_tokens || usage.output; if (ev.usage.server_tool_use) usage.web_searches = ev.usage.server_tool_use.web_search_requests || 0; } if (ev.delta && ev.delta.stop_reason) stop = ev.delta.stop_reason; }
       else if (ev.type === 'error') { throw new Error('API-Stream-Fehler: ' + ((ev.error && ev.error.message) || 'unbekannt')); }
     }
   }
-  return { text, usage, stop };
+  text = text.replace(/^\n+/, '');
+  if (!text.trim()) throw new Error(stop === 'max_tokens' ? 'Leere Antwort: Das Token-Limit wurde vom Denken aufgebraucht. MAX_TOKENS in config.js erhöhen oder EFFORT senken.' : 'Leere Antwort von der API (' + (stop || 'unbekannt') + ').');
+  return { text, usage, stop, searches };
 }
 function systemBlocks(kind) {
   if (kind === 'baseline') return undefined; // Teil 1: kein System Prompt
@@ -116,7 +126,7 @@ async function buildExport() {
   return {
     schema: 'reflexion-eval-log-v1', exportedAt: nowIso(),
     participantId: S.id, pairId: S.pairId, order: S.order, orderMeaning: 'Teil 1 Baseline (freies Prompten, kein System Prompt, eigener Chat), Teil 2 Prompt (neuer Chat), Teil 3 Paar',
-    model: C.MODEL, promptVersion: C.PROMPT_VERSION, phaseMinutes: C.PHASE_MINUTES,
+    model: C.MODEL, effort: C.EFFORT, thinking: C.THINKING || 'adaptive (Standard)', webSearch: C.WEB_SEARCH, promptVersion: C.PROMPT_VERSION, phaseMinutes: C.PHASE_MINUTES,
     prompts: { baseline: null, prompt: C.PROMPT_TEXT, generateInstruction: C.GENERATE_INSTRUCTION, chatInstruction: C.CHAT_INSTRUCTION },
     startedAt: new Date(S.startedMs).toISOString(), phases: S.phaseTimes,
     thesisChars: S.thesis.length, thesisHash: S.thesis ? thesisHash : null, thesis: S.includeThesis ? S.thesis : null,
@@ -155,7 +165,7 @@ function renderSetup(root) {
   const msg = h('div'); const info = (t, cls) => { msg.replaceChildren(h('div', { class: cls || 'hint', text: t })); };
   const testBtn = h('button', { text: 'Key & Verbindung testen', onclick: async () => {
     API_KEY = f.key.value.trim(); if (!API_KEY) return info('Bitte zuerst Key eingeben.', 'err');
-    info('Teste …'); try { await callClaude({ system: 'Antworte mit dem Wort ok.', messages: [{ role: 'user', content: 'Test' }], maxTokens: 16 }); info('Verbindung ok.', 'hint'); } catch (e) { info(e.message, 'err'); }
+    info('Teste …'); try { const ws = !!(C.WEB_SEARCH && (C.WEB_SEARCH.prompt || C.WEB_SEARCH.baseline)); await callClaude({ system: 'Antworte nur mit dem Wort ok. Nutze keine Tools.', messages: [{ role: 'user', content: 'Test' }], maxTokens: 2000, webSearch: ws }); info('Verbindung ok (Modell, Effort' + (ws ? ', Websuche-Tool' : '') + ' akzeptiert).', 'hint'); } catch (e) { info(e.message, 'err'); }
   } });
   const start = h('button', { class: 'primary', text: 'Session starten', onclick: async () => {
     API_KEY = f.key.value.trim(); const id = f.id.value.trim();
@@ -269,9 +279,9 @@ async function runAssistant(name) {
   const el = h('div', { class: 'msg assistant', text: '…' }); chat.list.append(el); chat.list.scrollTop = chat.list.scrollHeight;
   const t0 = Date.now();
   try {
-    const r = await callClaude({ system: systemBlocks(name === 'baseline' ? 'baseline' : 'chat'), messages: S.chats[name].map(m => ({ role: m.role, content: m.attachment ? '<dokument name="' + m.attachment.name + '">\n' + m.attachment.text + '\n</dokument>' + (m.content ? '\n\n' + m.content : '') : m.content })), maxTokens: C.MAX_TOKENS_CHAT, onDelta: (t) => { el.textContent = t; chat.list.scrollTop = chat.list.scrollHeight; } });
-    const msg = { role: 'assistant', content: r.text, t: nowIso(), latencyMs: Date.now() - t0, stop: r.stop }; S.chats[name].push(msg);
-    S.usage.push({ t: msg.t, kind: 'chat_' + name, ...r.usage }); log('chat_assistant', { chars: r.text.length, latencyMs: msg.latencyMs, stop: r.stop });
+    const r = await callClaude({ webSearch: !!(C.WEB_SEARCH && C.WEB_SEARCH[name]), onStatus: (s) => { if (el.dataset.started !== '1') el.textContent = '… ' + s; }, system: systemBlocks(name === 'baseline' ? 'baseline' : 'chat'), messages: S.chats[name].map(m => ({ role: m.role, content: m.attachment ? '<dokument name="' + m.attachment.name + '">\n' + m.attachment.text + '\n</dokument>' + (m.content ? '\n\n' + m.content : '') : m.content })), maxTokens: C.MAX_TOKENS_CHAT, onDelta: (t) => { el.dataset.started = '1'; el.textContent = t; chat.list.scrollTop = chat.list.scrollHeight; } });
+    const msg = { role: 'assistant', content: r.text, t: nowIso(), latencyMs: Date.now() - t0, stop: r.stop, webSearches: r.searches }; S.chats[name].push(msg);
+    S.usage.push({ t: msg.t, kind: 'chat_' + name, ...r.usage }); log('chat_assistant', { chars: r.text.length, latencyMs: msg.latencyMs, stop: r.stop, webSearches: r.searches });
   } catch (e) {
     el.remove(); log('api_error', { where: 'chat', message: e.message });
     chat.list.append(h('div', { class: 'err' }, e.message + ' ', h('button', { text: 'Erneut versuchen', onclick: () => runAssistant(name) }))); chat.list.scrollTop = chat.list.scrollHeight;
@@ -361,12 +371,13 @@ function renderBreak(root, after) {
   root.append(h('div', { class: 'wrap' }, h('div', { class: 'box' }, h('h1', { text: 'Teil ' + n + ' beendet' }),
     h('p', { text: 'Bitte jetzt den Fragebogen zu diesem Teil ausfüllen. Danach geht es weiter.' }),
     url ? h('p', {}, h('a', { href: url, target: '_blank', rel: 'noopener', text: 'Fragebogen öffnen' })) : h('div', { class: 'warn', text: 'Kein Fragebogen-Link in config.js hinterlegt (QUESTIONNAIRE.after_' + after + ').' }),
-    h('div', { class: 'row' }, h('button', { text: 'Log sichern (Zwischenstand)', onclick: () => doExport('teil' + n) }), h('button', { class: 'primary', text: 'Weiter', onclick: () => { log('break_continue', { after }); S.stepIdx++; enterStep(); save(); render(); } })))));
+    h('div', { class: 'row' }, h('button', { text: 'Log sichern (Zwischenstand)', onclick: () => doExport('teil' + n) }), h('button', { class: 'primary', text: 'Weiter', onclick: () => { log('break_continue', { after }); S.stepIdx++; enterStep(); save(); render(); if (curStep().kind === 'end' && !S.finalExported) { S.finalExported = true; doExport('final'); } } })))));
 }
 function renderEnd(root) {
   root.append(h('div', { class: 'wrap' }, h('div', { class: 'box' }, h('h1', { text: 'Fertig – danke!' }),
-    h('p', { text: 'Versuchsleitung: Log exportieren und danach alle lokalen Daten löschen.' }),
-    h('div', { class: 'row' }, h('button', { class: 'primary', text: 'Log exportieren (JSON)', onclick: () => doExport('final') }),
+    h('p', { text: 'Das Log wurde automatisch als JSON-Datei heruntergeladen (Downloads-Ordner).' }),
+    h('p', { class: 'hint', text: 'Versuchsleitung: Datei prüfen, dann alle lokalen Daten löschen. Falls kein Download erschien, hier nochmals herunterladen.' }),
+    h('div', { class: 'row' }, h('button', { text: 'Log nochmals herunterladen', onclick: () => doExport('final') }),
       h('button', { text: 'Alle lokalen Daten auf diesem Gerät löschen', onclick: () => { if (confirm('Wirklich alles löschen? Nicht exportierte Daten sind danach weg.')) { localStorage.removeItem(LS_KEY); S = null; API_KEY = ''; render(); } } })))));
 }
 

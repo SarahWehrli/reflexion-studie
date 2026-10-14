@@ -15,7 +15,7 @@
    selbst hoch (📎) oder fügen Text ein → Fragebogen → Teil 2 = neuer Chat mit deinem Prompt, Arbeit wird zu Beginn
    erneut hochgeladen/eingefügt (die KI weiss nichts aus Teil 1) → Fragebogen → Teil 3 (Paar) → Fragebogen → Ende.
    Der Timer ist eine Richtzeit; Teile werden über «Teil beenden» abgeschlossen.
-4. Am Ende **«Log exportieren (JSON)»**, dann **«Alle lokalen Daten löschen»**.
+4. Am Ende wird das Log **automatisch** als JSON in den Downloads-Ordner gespeichert. Prüfen, dann **«Alle lokalen Daten löschen»**.
 
 ## Was geloggt wird
 Chatverläufe beider Teile, alle Fragen mit Textstelle, Status (besprochen / später / verworfen),
