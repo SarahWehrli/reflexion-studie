@@ -9,10 +9,11 @@
 
 ## Pro Session (Versuchsleitung)
 1. `index.html` per Doppelklick im Browser öffnen (Chrome empfohlen).
-   Tipp: ID und Reihenfolge per Link vorbelegen: `index.html?id=P03&pair=Paar2&order=BA`
-2. ID, Reihenfolge (AB/BA, gegenbalancieren!), API-Key eintippen, Arbeit einfügen oder laden (.txt/.md/.pdf).
-   «Key & Verbindung testen», dann «Session starten».
-3. Ablauf: Teil 1 → Fragebogen → Teil 2 → Fragebogen → Teil 3 (Paar) → Fragebogen → Ende.
+   Tipp: ID per Link vorbelegen: `index.html?id=P03&pair=Paar2`
+2. ID und API-Key eintippen, «Key & Verbindung testen», dann «Session starten».
+3. Ablauf (feste Reihenfolge): Teil 1 = Baseline: eigener Chat ohne System Prompt, Studierende laden ihre Arbeit
+   selbst hoch (📎) oder fügen Text ein → Fragebogen → Teil 2 = neuer Chat mit deinem Prompt, Arbeit wird zu Beginn
+   erneut hochgeladen/eingefügt (die KI weiss nichts aus Teil 1) → Fragebogen → Teil 3 (Paar) → Fragebogen → Ende.
    Der Timer ist eine Richtzeit; Teile werden über «Teil beenden» abgeschlossen.
 4. Am Ende **«Log exportieren (JSON)»**, dann **«Alle lokalen Daten löschen»**.
 

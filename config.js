@@ -13,9 +13,8 @@ window.CONFIG = {
     after_pair: ""
   },
 
-  // Baseline: realistischer, einfacher Prompt (so würden Studierende ohnehin eine KI nutzen).
-  BASELINE_PROMPT:
-`Du bist ein hilfreicher Assistent. Die Person möchte mit dir über ihre eigene Arbeit reflektieren (Entscheidungen, Interpretationen, Annahmen im Forschungsprozess). Antworte auf Deutsch, es sei denn, die Person schreibt in einer anderen Sprache.`,
+  // Teil 1 (Baseline): kein System Prompt, eigener Chat. Studierende laden ihre Arbeit selbst hoch oder fügen sie ein.
+  // Teil 2 (Prompt): neuer Chat ohne Wissen aus Teil 1. Arbeit wird zu Beginn erneut hochgeladen/eingefügt.
 
   // >>> HIER DEINEN SYSTEM PROMPT EINFÜGEN <<<
   PROMPT_TEXT:

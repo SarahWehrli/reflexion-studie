@@ -59,7 +59,7 @@ async function callClaude({ system, messages, maxTokens, onDelta }) {
     res = await fetch(API_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({ model: C.MODEL, max_tokens: maxTokens, system, messages, stream: true })
+      body: JSON.stringify(Object.assign({ model: C.MODEL, max_tokens: maxTokens, messages, stream: true }, system ? { system } : {}))
     });
   } catch (e) { throw new Error('Netzwerkfehler oder vom Browser blockiert (CORS). Siehe README, Abschnitt «Lokaler Server».'); }
   if (!res.ok) { let m = ''; try { const j = await res.json(); m = (j.error && j.error.message) || ''; } catch (e) { /* ignorieren */ } throw apiError(res.status, m); }
@@ -82,7 +82,8 @@ async function callClaude({ system, messages, maxTokens, onDelta }) {
   return { text, usage, stop };
 }
 function systemBlocks(kind) {
-  const instr = kind === 'baseline' ? C.BASELINE_PROMPT : kind === 'generate' ? C.PROMPT_TEXT + '\n\n' + C.GENERATE_INSTRUCTION : C.PROMPT_TEXT + '\n\n' + C.CHAT_INSTRUCTION;
+  if (kind === 'baseline') return undefined; // Teil 1: kein System Prompt
+  const instr = kind === 'generate' ? C.PROMPT_TEXT + '\n\n' + C.GENERATE_INSTRUCTION : C.PROMPT_TEXT + '\n\n' + C.CHAT_INSTRUCTION;
   // Arbeit zuerst (mit Cache-Marker), damit alle Aufrufe dieselbe gecachte Präfix-Basis nutzen
   return [
     { type: 'text', text: '<arbeit_der_studierenden>\n' + S.thesis + '\n</arbeit_der_studierenden>', cache_control: { type: 'ephemeral' } },
@@ -114,14 +115,15 @@ async function buildExport() {
   const thesisHash = await hashText(S.thesis);
   return {
     schema: 'reflexion-eval-log-v1', exportedAt: nowIso(),
-    participantId: S.id, pairId: S.pairId, order: S.order, orderMeaning: S.order === 'AB' ? 'Baseline, dann Prompt, dann Paar' : 'Prompt, dann Baseline, dann Paar',
+    participantId: S.id, pairId: S.pairId, order: S.order, orderMeaning: 'Teil 1 Baseline (freies Prompten, kein System Prompt, eigener Chat), Teil 2 Prompt (neuer Chat), Teil 3 Paar',
     model: C.MODEL, promptVersion: C.PROMPT_VERSION, phaseMinutes: C.PHASE_MINUTES,
-    prompts: { baseline: C.BASELINE_PROMPT, prompt: C.PROMPT_TEXT, generateInstruction: C.GENERATE_INSTRUCTION, chatInstruction: C.CHAT_INSTRUCTION },
+    prompts: { baseline: null, prompt: C.PROMPT_TEXT, generateInstruction: C.GENERATE_INSTRUCTION, chatInstruction: C.CHAT_INSTRUCTION },
     startedAt: new Date(S.startedMs).toISOString(), phases: S.phaseTimes,
-    thesisChars: S.thesis.length, thesisHash, thesis: S.includeThesis ? S.thesis : null,
-    questions: S.questions, chats: S.chats, events: S.events, usage: S.usage
+    thesisChars: S.thesis.length, thesisHash: S.thesis ? thesisHash : null, thesis: S.includeThesis ? S.thesis : null,
+    questions: S.questions, chats: S.includeThesis ? S.chats : stripAttachments(S.chats), events: S.events, usage: S.usage
   };
 }
+function stripAttachments(chats) { const o = {}; for (const k of Object.keys(chats)) o[k] = chats[k].map(m => m.attachment ? Object.assign({}, m, { attachment: { name: m.attachment.name, chars: m.attachment.chars, text: null } }) : m); return o; }
 async function doExport(label) {
   const data = await buildExport(); const d = new Date();
   const name = `${S.id}_log_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${label ? '_' + label : ''}.json`;
@@ -148,25 +150,17 @@ function renderSetup(root) {
   let saved = null; try { saved = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch (e) { saved = null; }
   const placeholder = /PLATZHALTER/.test(C.PROMPT_TEXT);
   const f = { id: h('input', { value: q.get('id') || '', placeholder: 'z. B. P03' }), pair: h('input', { value: q.get('pair') || '', placeholder: 'z. B. Paar2' }),
-    order: h('select', {}, h('option', { value: 'AB', text: 'AB: Baseline zuerst, dann Prompt' }), h('option', { value: 'BA', text: 'BA: Prompt zuerst, dann Baseline' })),
     key: h('input', { type: 'password', placeholder: 'sk-ant-…', autocomplete: 'off' }),
-    thesis: h('textarea', { rows: 8, placeholder: 'Arbeitstext hier einfügen …' }), file: h('input', { type: 'file', accept: '.txt,.md,.pdf' }),
     incl: h('input', { type: 'checkbox', style: 'width:auto' }) };
-  f.order.value = q.get('order') === 'BA' ? 'BA' : 'AB';
   const msg = h('div'); const info = (t, cls) => { msg.replaceChildren(h('div', { class: cls || 'hint', text: t })); };
-  f.file.addEventListener('change', async () => {
-    const file = f.file.files[0]; if (!file) return;
-    try { info('Lese Datei …'); const t = /\.pdf$/i.test(file.name) ? await loadPdfText(file) : await file.text(); f.thesis.value = t; info(`Datei geladen: ${t.length} Zeichen. Bitte Text kurz auf Vollständigkeit prüfen.`); }
-    catch (e) { info('Datei konnte nicht gelesen werden (' + e.message + '). Bitte Text einfügen.', 'err'); }
-  });
   const testBtn = h('button', { text: 'Key & Verbindung testen', onclick: async () => {
     API_KEY = f.key.value.trim(); if (!API_KEY) return info('Bitte zuerst Key eingeben.', 'err');
     info('Teste …'); try { await callClaude({ system: 'Antworte mit dem Wort ok.', messages: [{ role: 'user', content: 'Test' }], maxTokens: 16 }); info('Verbindung ok.', 'hint'); } catch (e) { info(e.message, 'err'); }
   } });
   const start = h('button', { class: 'primary', text: 'Session starten', onclick: async () => {
-    API_KEY = f.key.value.trim(); const id = f.id.value.trim(), thesis = f.thesis.value.trim();
-    if (!id) return info('Bitte Teilnehmer-ID eingeben.', 'err'); if (!API_KEY) return info('Bitte API-Key eingeben.', 'err'); if (thesis.length < 200) return info('Arbeitstext fehlt oder ist sehr kurz.', 'err');
-    S = { v: 1, id, pairId: f.pair.value.trim(), order: f.order.value, thesis, includeThesis: f.incl.checked, steps: buildSteps(f.order.value), stepIdx: 0, startedMs: Date.now(), phaseTimes: {}, events: [], chats: { baseline: [], prompt: [] }, questions: [], usage: [], genRounds: 0 };
+    API_KEY = f.key.value.trim(); const id = f.id.value.trim();
+    if (!id) return info('Bitte Teilnehmer-ID eingeben.', 'err'); if (!API_KEY) return info('Bitte API-Key eingeben.', 'err');
+    S = { v: 1, id, pairId: f.pair.value.trim(), order: 'AB', thesis: '', includeThesis: f.incl.checked, steps: buildSteps('AB'), stepIdx: 0, startedMs: Date.now(), phaseTimes: {}, events: [], chats: { baseline: [], prompt: [] }, questions: [], usage: [], genRounds: 0 };
     log('session_start', { model: C.MODEL, promptVersion: C.PROMPT_VERSION, order: S.order, placeholderPrompt: placeholder }); enterStep(); render();
   } });
   const resume = saved && saved.events ? h('div', { class: 'warn' }, h('b', { text: 'Gespeicherte Session gefunden: ' + saved.id }), h('div', { class: 'small', text: 'Schritt ' + (saved.stepIdx + 1) + ' von ' + saved.steps.length + '. Zum Fortsetzen oben den API-Key eingeben.' }),
@@ -178,10 +172,8 @@ function renderSetup(root) {
     placeholder ? h('div', { class: 'warn', text: 'Achtung: In config.js ist noch der Platzhalter-Prompt aktiv.' }) : null,
     resume,
     h('label', {}, 'Teilnehmer-ID'), f.id, h('label', {}, 'Paar-ID (optional)'), f.pair,
-    h('label', {}, 'Reihenfolge ', h('span', { class: 'hint', text: '(gegenbalancieren: die Hälfte AB, die Hälfte BA)' })), f.order,
     h('label', {}, 'API-Key ', h('span', { class: 'hint', text: '(wird nur im Arbeitsspeicher gehalten, nie gespeichert oder geloggt)' })), f.key,
-    h('label', {}, 'Arbeitstext ', h('span', { class: 'hint', text: '(einfügen oder .txt/.md/.pdf laden)' })), f.file, h('div', { style: 'height:6px' }), f.thesis,
-    h('label', { style: 'font-weight:400;display:flex;gap:8px;align-items:center' }, f.incl, 'Arbeitstext im exportierten Log mitspeichern (sonst nur Länge und Hash)'),
+    h('label', { style: 'font-weight:400;display:flex;gap:8px;align-items:center' }, f.incl, 'Hochgeladene/eingefügte Arbeitstexte im exportierten Log mitspeichern (sonst nur Name, Länge und Hash)'),
     h('div', { class: 'row', style: 'margin-top:14px' }, testBtn, start), msg)));
 }
 function buildSteps(order) {
@@ -191,6 +183,7 @@ function buildSteps(order) {
 function enterStep() { const st = curStep(); if (st.kind === 'phase' && !S.phaseTimes[st.name]) { S.phaseTimes[st.name] = { start: nowIso(), startMs: Date.now(), end: null }; log('phase_start', { name: st.name }); } }
 function endPhase(name) { const t = S.phaseTimes[name]; if (t && !t.end) { t.end = nowIso(); t.durationSec = Math.round((Date.now() - t.startMs) / 1000); } log('phase_end', { name, durationSec: t && t.durationSec }); S.stepIdx++; enterStep(); save(); render(); }
 function loadScript(src) { return new Promise((res, rej) => { const s = h('script', { src }); s.onload = res; s.onerror = () => rej(new Error('Skript nicht ladbar')); document.head.append(s); }); }
+async function readFileText(file) { return /\.pdf$/i.test(file.name) ? loadPdfText(file) : file.text(); }
 async function loadPdfText(file) {
   const base = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
   if (!window.pdfjsLib) await loadScript(base + 'pdf.min.js');
@@ -215,12 +208,25 @@ function header(name, withTimer) {
 function renderChatPhase(root, name) {
   const isPrompt = name === 'prompt';
   root.append(header(name, true));
+  if (!isPrompt) { root.append(h('div', { class: 'grid one' }, chatColumn(name))); return; }
+  if (!S.thesis) return renderThesisLoad(root);
   const thesisBody = h('div', { class: 'body' }, h('div', { class: 'thesis', id: 'thesis' }));
   const cols = [h('section', { class: 'col' }, h('h2', { text: 'Deine Arbeit' }), thesisBody)];
   if (isPrompt) cols.push(questionsColumn());
   cols.push(chatColumn(name));
-  root.append(h('div', { class: 'grid ' + (isPrompt ? 'three' : 'two') }, cols));
+  root.append(h('div', { class: 'grid three' }, cols));
   ui.thesisEl = thesisBody.firstChild; refreshThesis();
+}
+function renderThesisLoad(root) {
+  const ta = h('textarea', { rows: 12, placeholder: 'Text deiner Arbeit hier einfügen …' }); const file = h('input', { type: 'file', accept: '.txt,.md,.pdf' }); const msg = h('div'); let src = 'paste', fname = '';
+  file.addEventListener('change', async () => { const f = file.files[0]; if (!f) return; msg.replaceChildren(h('div', { class: 'hint', text: 'Lese Datei …' }));
+    try { ta.value = await readFileText(f); src = 'upload'; fname = f.name; msg.replaceChildren(h('div', { class: 'hint', text: 'Datei geladen (' + ta.value.length + ' Zeichen). Bitte kurz prüfen, ob der Text vollständig ist.' })); }
+    catch (e) { msg.replaceChildren(h('div', { class: 'err', text: 'Datei konnte nicht gelesen werden (' + e.message + '). Bitte Text einfügen.' })); } });
+  root.append(h('div', { class: 'wrap' }, h('div', { class: 'box' }, h('h1', { text: 'Neuer Chat: Lade deine Arbeit' }),
+    h('p', { class: 'hint', text: 'Dies ist ein neuer Chat. Die KI weiss nichts aus dem vorherigen Teil. Lade deine Arbeit hoch oder füge den Text ein.' }),
+    file, h('div', { style: 'height:8px' }), ta, msg,
+    h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'primary', text: 'Weiter', onclick: async () => { const t = ta.value.trim(); if (t.length < 200) { msg.replaceChildren(h('div', { class: 'err', text: 'Der Text fehlt oder ist sehr kurz.' })); return; }
+      S.thesis = t; log('thesis_loaded', { source: src === 'upload' && t === ta.value.trim() ? 'upload' : 'paste', fileName: fname, chars: t.length, hash: await hashText(t) }); save(); render(); } })))));
 }
 function refreshThesis() {
   const el = ui.thesisEl; if (!el) return; el.replaceChildren(); ui.marks = {};
@@ -239,24 +245,31 @@ function focusQuestion(id, target) {
 function chatColumn(name) {
   const list = h('div', { class: 'body' }); const input = h('textarea', { rows: 2, placeholder: 'Nachricht schreiben … (Enter = senden, Shift+Enter = Zeilenumbruch)' });
   const send = h('button', { class: 'primary', text: 'Senden' });
-  ui.chat = { name, list, input, send, busy: false };
-  const addMsg = (m) => { const el = h('div', { class: 'msg ' + m.role, text: m.content }); list.append(el); list.scrollTop = list.scrollHeight; return el; };
+  ui.chat = { name, list, input, send, busy: false, pending: null };
+  const addMsg = (m) => { const el = h('div', { class: 'msg ' + m.role }, m.attachment ? h('div', {}, h('span', { class: 'att', text: '📎 ' + (m.attachment.name || 'Eingefügter Text') + ' (' + m.attachment.chars + ' Zeichen)' })) : null, m.content); list.append(el); list.scrollTop = list.scrollHeight; return el; };
   ui.chat.addMsg = addMsg; S.chats[name].forEach(addMsg);
-  const doSend = () => { const t = input.value.trim(); if (!t || ui.chat.busy) return; input.value = ''; sendUserMessage(name, t, 'typed'); };
+  const chip = h('span', { class: 'small' }); const fileIn = h('input', { type: 'file', accept: '.txt,.md,.pdf', style: 'display:none' });
+  const attBtn = name === 'baseline' ? h('button', { title: 'Datei anhängen', text: '📎', onclick: () => fileIn.click() }) : null;
+  fileIn.addEventListener('change', async () => { const f = fileIn.files[0]; fileIn.value = ''; if (!f) return; chip.textContent = 'Lese ' + f.name + ' …';
+    try { const t = (await readFileText(f)).trim(); ui.chat.pending = { name: f.name, chars: t.length, text: t }; chip.replaceChildren(h('span', { class: 'att', text: '📎 ' + f.name + ' (' + t.length + ' Zeichen)' }), ' ', h('button', { style: 'padding:0 6px;font-size:12px', text: '×', onclick: () => { ui.chat.pending = null; chip.textContent = ''; } })); }
+    catch (e) { chip.textContent = 'Datei nicht lesbar: ' + e.message; } });
+  const doSend = () => { const t = input.value.trim(); const att = ui.chat.pending; if ((!t && !att) || ui.chat.busy) return; input.value = ''; ui.chat.pending = null; chip.textContent = ''; sendUserMessage(name, t, 'typed', null, att); };
   send.addEventListener('click', doSend); input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); } });
-  return h('section', { class: 'col' }, h('h2', { text: 'Chat' }), list, h('div', { class: 'composer' }, input, send));
+  const hint = name === 'baseline' ? h('div', { class: 'hint', style: 'padding:10px 14px;border-bottom:1px solid var(--line)', text: 'Reflektiere mit der KI über deine Arbeit, so wie du es sonst auch tun würdest. Du kannst deine Arbeit mit 📎 hochladen (.pdf, .txt, .md) oder Text einfügen.' }) : null;
+  return h('section', { class: 'col' }, ...[h('h2', { text: 'Chat' }), hint, list, name === 'baseline' ? h('div', { style: 'padding:0 10px' }, chip, fileIn) : null, h('div', { class: 'composer' }, ...[attBtn, input, send].filter(Boolean))].filter(Boolean));
 }
 function setBusy(b) { ui.chat.busy = b; ui.chat.send.disabled = b; ui.chat.input.disabled = b; }
-function sendUserMessage(name, text, source, questionId) {
+function sendUserMessage(name, text, source, questionId, attachment) {
   const msg = { role: 'user', content: text, t: nowIso(), source: source || 'typed', questionId: questionId || null };
-  S.chats[name].push(msg); log('chat_user', { chars: text.length, source: msg.source, questionId: msg.questionId }); ui.chat.addMsg(msg); runAssistant(name);
+  if (attachment) msg.attachment = attachment;
+  S.chats[name].push(msg); log('chat_user', { chars: text.length, source: msg.source, questionId: msg.questionId, attachment: attachment ? { name: attachment.name, chars: attachment.chars } : null }); ui.chat.addMsg(msg); runAssistant(name);
 }
 async function runAssistant(name) {
   const chat = ui.chat; setBusy(true); chat.list.querySelectorAll('.err').forEach(e => e.remove());
   const el = h('div', { class: 'msg assistant', text: '…' }); chat.list.append(el); chat.list.scrollTop = chat.list.scrollHeight;
   const t0 = Date.now();
   try {
-    const r = await callClaude({ system: systemBlocks(name === 'baseline' ? 'baseline' : 'chat'), messages: S.chats[name].map(m => ({ role: m.role, content: m.content })), maxTokens: C.MAX_TOKENS_CHAT, onDelta: (t) => { el.textContent = t; chat.list.scrollTop = chat.list.scrollHeight; } });
+    const r = await callClaude({ system: systemBlocks(name === 'baseline' ? 'baseline' : 'chat'), messages: S.chats[name].map(m => ({ role: m.role, content: m.attachment ? '<dokument name="' + m.attachment.name + '">\n' + m.attachment.text + '\n</dokument>' + (m.content ? '\n\n' + m.content : '') : m.content })), maxTokens: C.MAX_TOKENS_CHAT, onDelta: (t) => { el.textContent = t; chat.list.scrollTop = chat.list.scrollHeight; } });
     const msg = { role: 'assistant', content: r.text, t: nowIso(), latencyMs: Date.now() - t0, stop: r.stop }; S.chats[name].push(msg);
     S.usage.push({ t: msg.t, kind: 'chat_' + name, ...r.usage }); log('chat_assistant', { chars: r.text.length, latencyMs: msg.latencyMs, stop: r.stop });
   } catch (e) {

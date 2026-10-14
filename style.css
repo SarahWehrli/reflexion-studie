@@ -50,3 +50,6 @@ mark.active,mark.flash{background:var(--hl2)}
 .map .card{background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:8px}
 .map .card.taken{border-color:var(--ok);background:#f2faf5}
 .tag{display:inline-block;font-size:12px;background:#eee;border-radius:99px;padding:1px 8px;margin-right:4px}
+
+.grid.one{grid-template-columns:minmax(0,900px);justify-content:center}
+.att{display:inline-block;font-size:13px;background:#fff;border:1px solid var(--line);border-radius:6px;padding:2px 8px;margin-bottom:4px}
