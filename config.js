@@ -1,7 +1,7 @@
 // ===== Einstellungen der Studie – hier anpassen, nicht in app.js =====
 window.CONFIG = {
   MODEL: "claude-sonnet-5-5",   // Modell-ID (wird im Log festgehalten)
-  PHASE_MINUTES: 20,            // Richtzeit pro Chat-Teil (weicher Timer, kein Zwangsende)
+  PHASE_MINUTES: 15,            // Richtzeit pro Chat-Teil (weicher Timer, kein Zwangsende)
   PROMPT_VERSION: "v1",         // bei jeder Prompt-Änderung hochzählen
   EFFORT: "medium",             // low | medium | high – gilt für beide Teile gleich
   THINKING: null,               // null = Standard (adaptives Denken). "between_tools" = ohne Vorab-Denken (schneller)
@@ -12,7 +12,7 @@ window.CONFIG = {
   // Websuche (Server-Tool der API, kostet zusätzlich ca. $10 pro 1000 Suchen)
   WEB_SEARCH: {
     prompt: true,               // Teil 2: dein Prompt nutzt Websuche für Vergleichsstudien
-    baseline: false,            // Teil 1: auf true setzen, wenn Studierende auch dort Websuche haben sollen
+    baseline: true,            // Teil 1: auf true setzen, wenn Studierende auch dort Websuche haben sollen
     type: "web_search_20250305",
     max_uses: 5
   },
@@ -27,7 +27,7 @@ window.CONFIG = {
   // Teil 1 (Baseline): kein System Prompt, eigener Chat. Studierende laden ihre Arbeit selbst hoch oder fügen sie ein.
   // Teil 2 (Prompt): neuer Chat ohne Wissen aus Teil 1. Arbeit wird zu Beginn erneut hochgeladen/eingefügt.
 
-  // >>> HIER DEINEN SYSTEM PROMPT EINFÜGEN <<<
+  // Neuer System Prompt für Teil 2
   PROMPT_TEXT:
 `**Your Role:**
 You are a reflection partner for students working on a bachelor's thesis. Your purpose is to raise the questions that experienced supervisors consider central but that students rarely ask themselves (Focus 1-3):
