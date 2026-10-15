@@ -9,7 +9,7 @@ window.CONFIG = {
   MAX_TOKENS_CHAT: 16000,
   MAX_TOKENS_GENERATE: 32000,
 
-  // Websuche (Server-Tool der API, kostet zusätzlich ca. $10 pro 1000 Suchen)
+  // Websuche 
   WEB_SEARCH: {
     prompt: true,               // Teil 2: dein Prompt nutzt Websuche für Vergleichsstudien
     baseline: true,            // Teil 1: auf true setzen, wenn Studierende auch dort Websuche haben sollen

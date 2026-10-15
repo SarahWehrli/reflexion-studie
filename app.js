@@ -122,18 +122,46 @@ function parseQuestions(text) {
 
 // ---------- Export ----------
 async function buildExport() {
-  const thesisHash = await hashText(S.thesis);
+  const questionById = (id) => S.questions.find(q => q.id === id);
+  const partSpecs = [
+    { name: 'baseline', title: 'Freies Prompten' },
+    { name: 'prompt', title: 'Prompt-gestützte Reflexion' },
+    { name: 'pair', title: 'Gespräch zu zweit' }
+  ];
+  const parts = partSpecs.map(({ name, title }) => {
+    const interactions = [];
+    if (name !== 'pair') {
+      S.chats[name].forEach(m => interactions.push({
+        at: m.t, type: 'chat_message', role: m.role, content: m.content,
+        ...(m.source ? { source: m.source } : {}),
+        ...(m.questionId ? { questionId: m.questionId } : {}),
+        ...(m.attachment ? { attachment: { name: m.attachment.name, chars: m.attachment.chars, text: S.includeThesis ? m.attachment.text : null } } : {})
+      }));
+    }
+    if (name === 'prompt') {
+      S.questions.forEach(q => interactions.push({
+        at: q.createdAt, type: 'generated_question', questionId: q.id,
+        question: q.question, passage: q.passage, category: q.type, round: q.round
+      }));
+    }
+    const eventTypes = name === 'prompt'
+      ? ['generate_start', 'focus', 'question_status', 'question_reason', 'question_note']
+      : name === 'pair' ? ['pair_status_change', 'pair_discussed'] : [];
+    S.events.filter(e => e.phase === name && eventTypes.includes(e.type)).forEach(e => {
+      const question = questionById(e.data.questionId);
+      interactions.push({
+        at: e.t, type: e.type, data: e.data,
+        ...(question ? { question: { id: question.id, text: question.question, passage: question.passage } } : {})
+      });
+    });
+    interactions.sort((a, b) => a.at.localeCompare(b.at));
+    return { part: partNumber(name), name, title, interactions };
+  }).sort((a, b) => a.part - b.part);
   return {
-    schema: 'reflexion-eval-log-v1', exportedAt: nowIso(),
-    participantId: S.id, pairId: S.pairId, order: S.order, orderMeaning: 'Teil 1 Baseline (freies Prompten, kein System Prompt, eigener Chat), Teil 2 Prompt (neuer Chat), Teil 3 Paar',
-    model: C.MODEL, effort: C.EFFORT, thinking: C.THINKING || 'adaptive (Standard)', webSearch: C.WEB_SEARCH, promptVersion: C.PROMPT_VERSION, phaseMinutes: C.PHASE_MINUTES,
-    prompts: { baseline: null, prompt: C.PROMPT_TEXT, generateInstruction: C.GENERATE_INSTRUCTION, chatInstruction: C.CHAT_INSTRUCTION },
-    startedAt: new Date(S.startedMs).toISOString(), phases: S.phaseTimes,
-    thesisChars: S.thesis.length, thesisHash: S.thesis ? thesisHash : null, thesis: S.includeThesis ? S.thesis : null,
-    questions: S.questions, chats: S.includeThesis ? S.chats : stripAttachments(S.chats), events: S.events, usage: S.usage
+    schema: 'reflexion-interaction-log-v1', exportedAt: nowIso(),
+    participantId: S.id, parts
   };
 }
-function stripAttachments(chats) { const o = {}; for (const k of Object.keys(chats)) o[k] = chats[k].map(m => m.attachment ? Object.assign({}, m, { attachment: { name: m.attachment.name, chars: m.attachment.chars, text: null } }) : m); return o; }
 async function doExport(label) {
   const data = await buildExport(); const d = new Date();
   const name = `${S.id}_log_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${label ? '_' + label : ''}.json`;
@@ -191,7 +219,7 @@ function buildSteps(order) {
   return [{ kind: 'phase', name: seq[0] }, { kind: 'break', after: seq[0] }, { kind: 'phase', name: seq[1] }, { kind: 'break', after: seq[1] }, { kind: 'phase', name: 'pair' }, { kind: 'break', after: 'pair' }, { kind: 'end' }];
 }
 function enterStep() { const st = curStep(); if (st.kind === 'phase' && !S.phaseTimes[st.name]) { S.phaseTimes[st.name] = { start: nowIso(), startMs: Date.now(), end: null }; log('phase_start', { name: st.name }); } }
-function endPhase(name) { const t = S.phaseTimes[name]; if (t && !t.end) { t.end = nowIso(); t.durationSec = Math.round((Date.now() - t.startMs) / 1000); } log('phase_end', { name, durationSec: t && t.durationSec }); S.stepIdx++; enterStep(); save(); render(); }
+function endPhase(name) { if ((ui.chat && ui.chat.busy) || ui.generating) { alert('Bitte warten, bis die laufende KI-Anfrage abgeschlossen ist.'); return; } const t = S.phaseTimes[name]; if (t && !t.end) { t.end = nowIso(); t.durationSec = Math.round((Date.now() - t.startMs) / 1000); } log('phase_end', { name, durationSec: t && t.durationSec }); S.stepIdx++; enterStep(); save(); render(); }
 function loadScript(src) { return new Promise((res, rej) => { const s = h('script', { src }); s.onload = res; s.onerror = () => rej(new Error('Skript nicht ladbar')); document.head.append(s); }); }
 async function readFileText(file) { return /\.pdf$/i.test(file.name) ? loadPdfText(file) : file.text(); }
 async function loadPdfText(file) {
@@ -230,10 +258,10 @@ function renderChatPhase(root, name) {
 function renderThesisLoad(root) {
   const ta = h('textarea', { rows: 12, placeholder: 'Text deiner Arbeit hier einfügen …' }); const file = h('input', { type: 'file', accept: '.txt,.md,.pdf' }); const msg = h('div'); let src = 'paste', fname = '';
   file.addEventListener('change', async () => { const f = file.files[0]; if (!f) return; msg.replaceChildren(h('div', { class: 'hint', text: 'Lese Datei …' }));
-    try { ta.value = await readFileText(f); src = 'upload'; fname = f.name; msg.replaceChildren(h('div', { class: 'hint', text: 'Datei geladen (' + ta.value.length + ' Zeichen). Bitte kurz prüfen, ob der Text vollständig ist.' })); }
+    try { ta.value = await readFileText(f); src = 'upload'; fname = f.name; msg.replaceChildren(h('div', { class: 'hint', text: 'Datei geladen (' + ta.value.length + ' Zeichen)' })); }
     catch (e) { msg.replaceChildren(h('div', { class: 'err', text: 'Datei konnte nicht gelesen werden (' + e.message + '). Bitte Text einfügen.' })); } });
   root.append(h('div', { class: 'wrap' }, h('div', { class: 'box' }, h('h1', { text: 'Neuer Chat: Lade deine Arbeit' }),
-    h('p', { class: 'hint', text: 'Dies ist ein neuer Chat. Die KI weiss nichts aus dem vorherigen Teil. Lade deine Arbeit hoch oder füge den Text ein.' }),
+    h('p', { class: 'hint', text: 'Dies ist ein neuer Chat. Die KI weiss nichts aus dem vorherigen Teil. Lade deine Arbeit hoch oder füge den Text ein über den du reflektieren möchtest.' }),
     file, h('div', { style: 'height:8px' }), ta, msg,
     h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'primary', text: 'Weiter', onclick: async () => { const t = ta.value.trim(); if (t.length < 200) { msg.replaceChildren(h('div', { class: 'err', text: 'Der Text fehlt oder ist sehr kurz.' })); return; }
       S.thesis = t; log('thesis_loaded', { source: src === 'upload' && t === ta.value.trim() ? 'upload' : 'paste', fileName: fname, chars: t.length, hash: await hashText(t) }); save(); render(); } })))));
@@ -265,7 +293,7 @@ function chatColumn(name) {
     catch (e) { chip.textContent = 'Datei nicht lesbar: ' + e.message; } });
   const doSend = () => { const t = input.value.trim(); const att = ui.chat.pending; if ((!t && !att) || ui.chat.busy) return; input.value = ''; ui.chat.pending = null; chip.textContent = ''; sendUserMessage(name, t, 'typed', null, att); };
   send.addEventListener('click', doSend); input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); } });
-  const hint = name === 'baseline' ? h('div', { class: 'hint', style: 'padding:10px 14px;border-bottom:1px solid var(--line)', text: 'Reflektiere mit der KI über deine Arbeit, so wie du es sonst auch tun würdest. Du kannst deine Arbeit mit 📎 hochladen (.pdf, .txt, .md) oder Text einfügen.' }) : null;
+  const hint = name === 'baseline' ? h('div', { class: 'hint', style: 'padding:10px 14px;border-bottom:1px solid var(--line)', text: 'Nutze diesen Chat so, wie du einen KI-Chat normalerweise zur Reflexion deiner Arbeit nutzen würdest. Du kannst über die ganze Arbeit oder einzelne Teile nachdenken, Fragen stellen, Gedanken prüfen oder Unklarheiten besprechen. Entscheide selbst, worüber und wie du sprechen möchtest. Lade deine Arbeit mit 📎 hoch (.pdf, .txt, .md) oder füge den relevanten Text ein.' }) : null;
   return h('section', { class: 'col' }, ...[h('h2', { text: 'Chat' }), hint, list, name === 'baseline' ? h('div', { style: 'padding:0 10px' }, chip, fileIn) : null, h('div', { class: 'composer' }, ...[attBtn, input, send].filter(Boolean))].filter(Boolean));
 }
 function setBusy(b) { ui.chat.busy = b; ui.chat.send.disabled = b; ui.chat.input.disabled = b; }
@@ -296,7 +324,7 @@ function questionsColumn() {
   const updateCounts = () => { const c = { open: 0, later: 0, discussed: 0, dismissed: 0 }; S.questions.forEach(q => c[q.status]++); counts.textContent = Object.keys(STATUS).map(k => STATUS[k] + ' ' + c[k]).join(' · '); };
   ui.updateCounts = updateCounts;
   gen.addEventListener('click', async () => {
-    gen.disabled = true; msg.replaceChildren(h('div', { class: 'hint', text: 'Die KI liest deine Arbeit … das dauert einen Moment.' })); const t0 = Date.now(); const round = ++S.genRounds;
+    gen.disabled = true; ui.generating = true; msg.replaceChildren(h('div', { class: 'hint', text: 'Die KI liest deine Arbeit … das dauert einen Moment.' })); const t0 = Date.now(); const round = ++S.genRounds;
     const already = S.questions.map(q => '- ' + q.passage.slice(0, 120)).join('\n');
     const userMsg = round === 1 ? 'Bitte markiere jetzt passende Stellen in meiner Arbeit und stelle dazu Reflexionsfragen.' : 'Bitte markiere weitere passende Stellen, die noch nicht abgedeckt sind, und stelle dazu Reflexionsfragen. Bereits verwendete Stellen:\n' + already;
     log('generate_start', { round });
@@ -312,12 +340,14 @@ function questionsColumn() {
       msg.replaceChildren(found < items.length ? h('div', { class: 'hint', text: (items.length - found) + ' Frage(n) ohne auffindbare Textstelle (werden ohne Markierung gezeigt).' }) : '');
       gen.textContent = 'Weitere Fragen'; renderCards(); refreshThesis();
     } catch (e) { S.genRounds--; log('api_error', { where: 'generate', message: e.message }); msg.replaceChildren(h('div', { class: 'err', text: e.message + ' – bitte nochmals versuchen.' })); }
-    finally { gen.disabled = false; }
+    finally { gen.disabled = false; ui.generating = false; }
   });
   ui.renderCards = renderCards;
   function renderCards() { body.replaceChildren(); ui.cards = {}; S.questions.forEach((q, i) => { const c = questionCard(q, i + 1); ui.cards[q.id] = c; body.append(c); }); updateCounts(); }
   renderCards();
-  return h('section', { class: 'col' }, h('h2', { text: 'Fragen' }), h('div', { style: 'padding:10px 14px;border-bottom:1px solid var(--line)' }, h('div', { class: 'row' }, gen, h('span', { class: 'spacer' })), msg, counts), body);
+  return h('section', { class: 'col' }, h('h2', { text: 'Fragen' }), h('div', { style: 'padding:10px 14px;border-bottom:1px solid var(--line)' },
+    h('p', { class: 'hint', text: 'Ziel ist, über deine Arbeit und deine Entscheidungen zu reflektieren. Lass dazu Fragen zu passenden Stellen erzeugen und besprich sie im Chat, markiere sie als «Schon besprochen» oder «Für später» oder verwirf sie mit einem passenden Grund.' }),
+    h('div', { class: 'row' }, gen, h('span', { class: 'spacer' })), msg, counts), body);
 }
 function questionCard(q, n) {
   const card = h('div', { class: 'q' + (q.status !== 'open' ? ' done' : '') });
@@ -333,7 +363,7 @@ function questionCard(q, n) {
     more.replaceChildren(); if (q.status === 'open') return;
     if (q.status === 'dismissed') more.append(h('div', { class: 'chips' }, DISMISS_REASONS.map(r => h('button', { class: q.reason === r ? 'active' : '', text: r, onclick: () => { q.reason = q.reason === r ? '' : r; log('question_reason', { questionId: q.id, reason: q.reason }); save(); drawMore(); } }))));
     const ph = q.status === 'discussed' ? 'Wo / mit wem besprochen? (optional)' : q.status === 'later' ? 'Notiz (optional)' : 'Kurz begründen (optional)';
-    more.append(h('textarea', { rows: 1, placeholder: ph, value: q.reasonText, onchange: (e) => { q.reasonText = e.target.value; log('question_note', { questionId: q.id, chars: q.reasonText.length }); save(); } }));
+    more.append(h('textarea', { rows: 1, placeholder: ph, value: q.reasonText, onchange: (e) => { q.reasonText = e.target.value; log('question_note', { questionId: q.id, chars: q.reasonText.length, text: q.reasonText }); save(); } }));
   };
   card.append(h('div', { class: 'small', text: 'Frage ' + n }), q.found && !q.overlap ? h('div', { class: 'cite', text: '«' + (q.passage.length > 160 ? q.passage.slice(0, 160) + '…' : q.passage) + '»', onclick: () => focusQuestion(q.id, 'mark') }) : h('div', { class: 'cite', text: q.found ? '(Stelle überlappt mit einer anderen Markierung) «' + q.passage.slice(0, 100) + '…»' : '(Keine Markierung möglich) «' + q.passage.slice(0, 100) + '»' }), h('div', { class: 'text', text: q.question }), btns, more);
   drawBtns(); drawMore(); return card;
@@ -368,8 +398,13 @@ function renderPair(root) {
 // ---------- Pause / Ende ----------
 function renderBreak(root, after) {
   const url = C.QUESTIONNAIRE && C.QUESTIONNAIRE['after_' + after]; const n = partNumber(after);
+  const nextStepHint = after === 'pair'
+    ? 'Bitte fülle zuerst den Fragebogen zu diesem Teil aus. Kehre danach hierher zurück und klicke auf «Weiter», um die Studie abzuschliessen.'
+    : after === 'prompt'
+      ? 'Bitte fülle zuerst den Fragebogen zu diesem Teil aus und melde dich danach bei mir. Anschliessend kannst du auf «Weiter» klicken, um mit Teil 3 zu beginnen.'
+    : 'Bitte fülle zuerst den Fragebogen zu diesem Teil aus. Kehre danach hierher zurück und klicke auf «Weiter», um mit dem nächsten Teil zu beginnen.';
   root.append(h('div', { class: 'wrap' }, h('div', { class: 'box' }, h('h1', { text: 'Teil ' + n + ' beendet' }),
-    h('p', { text: 'Bitte jetzt den Fragebogen zu diesem Teil ausfüllen. Danach geht es weiter.' }),
+    h('p', { text: nextStepHint }),
     url ? h('p', {}, h('a', { href: url, target: '_blank', rel: 'noopener', text: 'Fragebogen öffnen' })) : h('div', { class: 'warn', text: 'Kein Fragebogen-Link in config.js hinterlegt (QUESTIONNAIRE.after_' + after + ').' }),
     h('div', { class: 'row' }, h('button', { text: 'Log sichern (Zwischenstand)', onclick: () => doExport('teil' + n) }), h('button', { class: 'primary', text: 'Weiter', onclick: () => { log('break_continue', { after }); S.stepIdx++; enterStep(); save(); render(); if (curStep().kind === 'end' && !S.finalExported) { S.finalExported = true; doExport('final'); } } })))));
 }
