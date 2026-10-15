@@ -1,33 +1,33 @@
-// ===== Einstellungen der Studie – hier anpassen, nicht in app.js =====
+// ===== Study settings - edit here, not in app.js =====
 window.CONFIG = {
-  MODEL: "claude-sonnet-5-5",   // Modell-ID (wird im Log festgehalten)
-  PHASE_MINUTES: 15,            // Richtzeit pro Chat-Teil (weicher Timer, kein Zwangsende)
-  PROMPT_VERSION: "v1",         // bei jeder Prompt-Änderung hochzählen
-  EFFORT: "medium",             // low | medium | high – gilt für beide Teile gleich
-  THINKING: null,               // null = Standard (adaptives Denken). "between_tools" = ohne Vorab-Denken (schneller)
-  // max_tokens zählt Denken + Antwort zusammen. Zu tief = leere Antworten.
+  MODEL: "claude-sonnet-5-5",   // Model ID (recorded in the log)
+  PHASE_MINUTES: 15,            // Suggested time per chat part (soft timer; does not end the part)
+  PROMPT_VERSION: "v1",         // Increment this whenever the prompt changes
+  EFFORT: "medium",             // low | medium | high - applies to both parts
+  THINKING: null,               // null = default adaptive thinking. "between_tools" = no upfront thinking (faster)
+  // max_tokens includes thinking and response tokens. Too low can result in an empty response.
   MAX_TOKENS_CHAT: 16000,
   MAX_TOKENS_GENERATE: 32000,
 
-  // Websuche 
+  // Web search
   WEB_SEARCH: {
-    prompt: true,               // Teil 2: dein Prompt nutzt Websuche für Vergleichsstudien
-    baseline: true,            // Teil 1: auf true setzen, wenn Studierende auch dort Websuche haben sollen
+    prompt: true,               // Part 2: the prompt uses web search for comparable studies
+    baseline: true,             // Part 1: set to true if participants should also have web search
     type: "web_search_20250305",
     max_uses: 5
   },
 
-  // Links zu den Fragebögen (pro Teil). Leer lassen = kein Button.
+  // Questionnaire links (one per part). Leave empty to show no button.
   QUESTIONNAIRE: {
     after_baseline: "",
     after_prompt: "",
     after_pair: ""
   },
 
-  // Teil 1 (Baseline): kein System Prompt, eigener Chat. Studierende laden ihre Arbeit selbst hoch oder fügen sie ein.
-  // Teil 2 (Prompt): neuer Chat ohne Wissen aus Teil 1. Arbeit wird zu Beginn erneut hochgeladen/eingefügt.
+  // Part 1 (baseline): no system prompt; a separate chat. Participants upload or paste their thesis.
+  // Part 2 (prompt): a new chat with no knowledge of Part 1. The thesis is uploaded or pasted again at the start.
 
-  // Neuer System Prompt für Teil 2
+  // System prompt for Part 2
   PROMPT_TEXT:
 `**Your Role:**
 You are a reflection partner for students working on a bachelor's thesis. Your purpose is to raise the questions that experienced supervisors consider central but that students rarely ask themselves (Focus 1-3):
@@ -72,13 +72,13 @@ Be critical, not confirmatory. Do not open with praise; if something is well rea
 **Boundaries**
 After three or four exchanges on one point, help the student close it (a decision or a limitation) and move on. When a question needs expert judgement in the field, suggest asking the supervisor and help phrase the question. When a question rests on an assumption about the field, say so. At the first shown source, remind the student to open and check it.`,
 
-  // Technischer Zusatz, den die App ans Ende deines Prompts hängt, damit die Stellen markiert werden können.
+  // Technical instruction appended to the prompt so the app can highlight passages.
   GENERATE_INSTRUCTION:
-`AUSGABEFORMAT (technische Vorgabe der App): Gib ausschliesslich ein JSON-Array zurück, ohne Text davor oder danach und ohne Codeblock. Jedes Element hat die Form:
-{"passage": "<wörtliches, unverändertes Zitat aus der Arbeit, maximal 300 Zeichen>", "question": "<deine Reflexionsfrage an die Person>", "type": "<ein Stichwort, worauf die Frage zielt, z. B. consequence, alternative, assumption>"}
-Das Zitat muss exakt so im Text der Arbeit vorkommen. Gib 5 bis 8 Elemente zurück, verteilt über verschiedene Stellen der Arbeit.`,
+`OUTPUT FORMAT (technical app requirement): Return only a JSON array, with no text before or after it and no code block. Each item must have this form:
+{"passage": "<exact, unchanged quote from the thesis, maximum 300 characters>", "question": "<reflection question for the student>", "type": "<one-word focus, e.g. consequence, alternative, assumption>"}
+The quote must appear exactly in the thesis text. Return 5 to 8 items covering different passages in the thesis.`,
 
-  // Zusatz für den freien Chat im Prompt-Teil (kein JSON).
+  // Additional instructions for the free chat in Part 2 (no JSON).
   CHAT_INSTRUCTION:
-`Im Chat antwortest du in normalem Text (kein JSON). Halte dich an die oben beschriebene Rolle. Wenn die Person eine deiner Fragen vertiefen möchte, geh darauf ein, ohne sofort die Antwort vorwegzunehmen.`
+`In the chat, respond in normal prose (not JSON). Follow the role described above. If the student wants to explore one of your questions further, engage with it without immediately giving away the answer.`
 };

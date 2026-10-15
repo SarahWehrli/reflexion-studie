@@ -3,15 +3,15 @@
 const C = window.CONFIG;
 const LS_KEY = 'reflexions-studie-session-v1';
 const API_URL = 'https://api.anthropic.com/v1/messages';
-const STATUS = { open:'Offen', later:'Für später', discussed:'Schon besprochen', dismissed:'Verworfen' };
-const DISMISS_REASONS = ['Schon bedacht', 'Frage passt nicht', 'Stelle passt nicht', 'Nicht relevant', 'Andere'];
+const STATUS = { open:'Open', later:'For later', discussed:'Discussed', dismissed:'Dismissed' };
+const DISMISS_REASONS = ['Already considered', 'Question does not fit', 'Passage does not fit', 'Not relevant', 'Other'];
 
-let API_KEY = '';       // nur im Arbeitsspeicher, nie gespeichert oder geloggt
-let S = null;           // Session-Zustand
+let API_KEY = '';       // Kept in memory only; never stored or logged
+let S = null;           // Session state
 let timerHandle = null;
-let ui = {};            // Referenzen auf aktuelle DOM-Elemente
+let ui = {};            // References to current DOM elements
 
-// ---------- kleine Helfer ----------
+// ---------- Helpers ----------
 function h(tag, props, ...kids) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(props || {})) {
@@ -29,7 +29,7 @@ function h(tag, props, ...kids) {
   return el;
 }
 const app = () => document.getElementById('app');
-function save() { try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch (e) { /* Speicher voll/blockiert */ } }
+function save() { try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch (e) { /* Storage full or blocked */ } }
 function nowIso() { return new Date().toISOString(); }
 function curStep() { return S.steps[S.stepIdx]; }
 function curPhaseName() { const s = curStep(); return s ? (s.kind === 'phase' ? s.name : s.kind === 'break' ? 'break_' + s.after : s.kind) : 'setup'; }
@@ -48,12 +48,12 @@ async function hashText(t) {
 
 // ---------- API ----------
 function apiError(status, msg) {
-  const map = { 401: 'API-Key ungültig oder fehlt.', 403: 'Zugriff verweigert (Key/Rechte prüfen).', 404: 'Modell nicht gefunden (MODEL in config.js prüfen).', 429: 'Rate-Limit oder Guthaben/Limit erreicht.', 529: 'API überlastet, bitte gleich nochmals versuchen.' };
-  const e = new Error((map[status] || ('API-Fehler ' + status)) + (msg ? ' (' + msg + ')' : ''));
+  const map = { 401: 'API key is invalid or missing.', 403: 'Access denied (check the key and permissions).', 404: 'Model not found (check MODEL in config.js).', 429: 'Rate limit or account quota reached.', 529: 'API is overloaded. Please try again shortly.' };
+  const e = new Error((map[status] || ('API error ' + status)) + (msg ? ' (' + msg + ')' : ''));
   e.status = status; return e;
 }
 async function callClaude({ system, messages, maxTokens, onDelta, onStatus, webSearch }) {
-  if (!API_KEY) throw new Error('Kein API-Key im Speicher. Bitte Seite neu laden und Key eingeben.');
+  if (!API_KEY) throw new Error('No API key in memory. Reload the page and enter the key.');
   let res;
   try {
     res = await fetch(API_URL, {
@@ -63,7 +63,7 @@ async function callClaude({ system, messages, maxTokens, onDelta, onStatus, webS
         system ? { system } : {}, C.EFFORT ? { output_config: { effort: C.EFFORT } } : {}, C.THINKING ? { thinking: { type: C.THINKING } } : {},
         webSearch && C.WEB_SEARCH ? { tools: [{ type: C.WEB_SEARCH.type, name: 'web_search', max_uses: C.WEB_SEARCH.max_uses }] } : {}))
     });
-  } catch (e) { throw new Error('Netzwerkfehler oder vom Browser blockiert (CORS). Siehe README, Abschnitt «Lokaler Server».'); }
+  } catch (e) { throw new Error('Network error or blocked by the browser (CORS). See the "Local server" section in README.'); }
   if (!res.ok) { let m = ''; try { const j = await res.json(); m = (j.error && j.error.message) || ''; } catch (e) { /* ignorieren */ } throw apiError(res.status, m); }
   const reader = res.body.getReader(); const dec = new TextDecoder();
   let buf = '', text = '', stop = null; const usage = { input: 0, output: 0, cache_read: 0, cache_write: 0, web_searches: 0 }; const blocks = {}; const searches = [];
@@ -77,31 +77,31 @@ async function callClaude({ system, messages, maxTokens, onDelta, onStatus, webS
       let ev; try { ev = JSON.parse(line.slice(5).trim()); } catch (e) { continue; }
       if (ev.type === 'message_start' && ev.message && ev.message.usage) { const u = ev.message.usage; usage.input = u.input_tokens || 0; usage.cache_read = u.cache_read_input_tokens || 0; usage.cache_write = u.cache_creation_input_tokens || 0; }
       else if (ev.type === 'content_block_start' && ev.content_block) { const b = ev.content_block; blocks[ev.index] = { type: b.type, json: '' };
-        if (b.type === 'thinking' || b.type === 'redacted_thinking') { if (onStatus && !text) onStatus('denkt nach …'); }
-        else if (b.type === 'server_tool_use') { if (onStatus) onStatus('sucht im Web …'); }
+        if (b.type === 'thinking' || b.type === 'redacted_thinking') { if (onStatus && !text) onStatus('thinking ...'); }
+        else if (b.type === 'server_tool_use') { if (onStatus) onStatus('searching the web ...'); }
         else if (b.type === 'text' && text && !/\n$/.test(text)) { text += '\n\n'; } }
       else if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta') { text += ev.delta.text; if (onDelta) onDelta(text); }
       else if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'input_json_delta' && blocks[ev.index]) { blocks[ev.index].json += ev.delta.partial_json || ''; }
       else if (ev.type === 'content_block_stop' && blocks[ev.index] && blocks[ev.index].type === 'server_tool_use') { try { const q = JSON.parse(blocks[ev.index].json || '{}').query; if (q) searches.push(q); } catch (e) { /* ignorieren */ } }
       else if (ev.type === 'message_delta') { if (ev.usage) { usage.output = ev.usage.output_tokens || usage.output; if (ev.usage.server_tool_use) usage.web_searches = ev.usage.server_tool_use.web_search_requests || 0; } if (ev.delta && ev.delta.stop_reason) stop = ev.delta.stop_reason; }
-      else if (ev.type === 'error') { throw new Error('API-Stream-Fehler: ' + ((ev.error && ev.error.message) || 'unbekannt')); }
+      else if (ev.type === 'error') { throw new Error('API stream error: ' + ((ev.error && ev.error.message) || 'unknown')); }
     }
   }
   text = text.replace(/^\n+/, '');
-  if (!text.trim()) throw new Error(stop === 'max_tokens' ? 'Leere Antwort: Das Token-Limit wurde vom Denken aufgebraucht. MAX_TOKENS in config.js erhöhen oder EFFORT senken.' : 'Leere Antwort von der API (' + (stop || 'unbekannt') + ').');
+  if (!text.trim()) throw new Error(stop === 'max_tokens' ? 'Empty response: thinking used the token limit. Increase MAX_TOKENS or lower EFFORT in config.js.' : 'Empty response from the API (' + (stop || 'unknown') + ').');
   return { text, usage, stop, searches };
 }
 function systemBlocks(kind) {
-  if (kind === 'baseline') return undefined; // Teil 1: kein System Prompt
+  if (kind === 'baseline') return undefined; // Part 1: no system prompt
   const instr = kind === 'generate' ? C.PROMPT_TEXT + '\n\n' + C.GENERATE_INSTRUCTION : C.PROMPT_TEXT + '\n\n' + C.CHAT_INSTRUCTION;
-  // Arbeit zuerst (mit Cache-Marker), damit alle Aufrufe dieselbe gecachte Präfix-Basis nutzen
+  // Put the thesis first so calls share the same cached prefix.
   return [
-    { type: 'text', text: '<arbeit_der_studierenden>\n' + S.thesis + '\n</arbeit_der_studierenden>', cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: '<student_thesis>\n' + S.thesis + '\n</student_thesis>', cache_control: { type: 'ephemeral' } },
     { type: 'text', text: instr }
   ];
 }
 
-// ---------- Passage finden & Fragen parsen ----------
+// ---------- Find passages and parse questions ----------
 function escRe(c) { return c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 function locate(thesis, passage) {
   const p = (passage || '').trim(); if (p.length < 8) return null;
@@ -115,7 +115,7 @@ function locate(thesis, passage) {
 }
 function parseQuestions(text) {
   const a = text.indexOf('['), b = text.lastIndexOf(']');
-  if (a < 0 || b <= a) throw new Error('Die Antwort enthielt kein JSON-Array.');
+  if (a < 0 || b <= a) throw new Error('The response did not contain a JSON array.');
   const arr = JSON.parse(text.slice(a, b + 1));
   return arr.filter(x => x && typeof x.question === 'string' && x.question.trim());
 }
@@ -124,9 +124,9 @@ function parseQuestions(text) {
 async function buildExport() {
   const questionById = (id) => S.questions.find(q => q.id === id);
   const partSpecs = [
-    { name: 'baseline', title: 'Freies Prompten' },
-    { name: 'prompt', title: 'Prompt-gestützte Reflexion' },
-    { name: 'pair', title: 'Gespräch zu zweit' }
+    { name: 'baseline', title: 'Free reflection' },
+    { name: 'prompt', title: 'Prompt-guided reflection' },
+    { name: 'pair', title: 'Pair discussion' }
   ];
   const parts = partSpecs.map(({ name, title }) => {
     const interactions = [];
@@ -171,7 +171,7 @@ async function doExport(label) {
 }
 window.addEventListener('beforeunload', (e) => { if (S && S.events && S.events.length > (S.exportedAtEvents || 0) + 1 && curStep() && curStep().kind !== 'setup') { e.preventDefault(); e.returnValue = ''; } });
 
-// ---------- Rendering: Grundgerüst ----------
+// ---------- Rendering ----------
 function render() {
   if (timerHandle) { clearInterval(timerHandle); timerHandle = null; }
   ui = {}; const root = app(); root.replaceChildren();
@@ -186,32 +186,32 @@ function render() {
 function renderSetup(root) {
   const q = new URLSearchParams(location.search);
   let saved = null; try { saved = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch (e) { saved = null; }
-  const placeholder = /PLATZHALTER/.test(C.PROMPT_TEXT);
-  const f = { id: h('input', { value: q.get('id') || '', placeholder: 'z. B. P03' }), pair: h('input', { value: q.get('pair') || '', placeholder: 'z. B. Paar2' }),
-    key: h('input', { type: 'password', placeholder: 'sk-ant-…', autocomplete: 'off' }),
+  const placeholder = /PLACEHOLDER/.test(C.PROMPT_TEXT);
+  const f = { id: h('input', { value: q.get('id') || '', placeholder: 'e.g. P03' }), pair: h('input', { value: q.get('pair') || '', placeholder: 'e.g. Pair2' }),
+    key: h('input', { type: 'password', placeholder: 'sk-ant-...', autocomplete: 'off' }),
     incl: h('input', { type: 'checkbox', style: 'width:auto' }) };
   const msg = h('div'); const info = (t, cls) => { msg.replaceChildren(h('div', { class: cls || 'hint', text: t })); };
-  const testBtn = h('button', { text: 'Key & Verbindung testen', onclick: async () => {
-    API_KEY = f.key.value.trim(); if (!API_KEY) return info('Bitte zuerst Key eingeben.', 'err');
-    info('Teste …'); try { const ws = !!(C.WEB_SEARCH && (C.WEB_SEARCH.prompt || C.WEB_SEARCH.baseline)); await callClaude({ system: 'Antworte nur mit dem Wort ok. Nutze keine Tools.', messages: [{ role: 'user', content: 'Test' }], maxTokens: 2000, webSearch: ws }); info('Verbindung ok (Modell, Effort' + (ws ? ', Websuche-Tool' : '') + ' akzeptiert).', 'hint'); } catch (e) { info(e.message, 'err'); }
+  const testBtn = h('button', { text: 'Test key and connection', onclick: async () => {
+    API_KEY = f.key.value.trim(); if (!API_KEY) return info('Enter the API key first.', 'err');
+    info('Testing ...'); try { const ws = !!(C.WEB_SEARCH && (C.WEB_SEARCH.prompt || C.WEB_SEARCH.baseline)); await callClaude({ system: 'Reply only with the word ok. Do not use tools.', messages: [{ role: 'user', content: 'Test' }], maxTokens: 2000, webSearch: ws }); info('Connection successful (model, effort' + (ws ? ', web search tool' : '') + ' accepted).', 'hint'); } catch (e) { info(e.message, 'err'); }
   } });
-  const start = h('button', { class: 'primary', text: 'Session starten', onclick: async () => {
+  const start = h('button', { class: 'primary', text: 'Start session', onclick: async () => {
     API_KEY = f.key.value.trim(); const id = f.id.value.trim();
-    if (!id) return info('Bitte Teilnehmer-ID eingeben.', 'err'); if (!API_KEY) return info('Bitte API-Key eingeben.', 'err');
+    if (!id) return info('Enter the participant ID.', 'err'); if (!API_KEY) return info('Enter the API key.', 'err');
     S = { v: 1, id, pairId: f.pair.value.trim(), order: 'AB', thesis: '', includeThesis: f.incl.checked, steps: buildSteps('AB'), stepIdx: 0, startedMs: Date.now(), phaseTimes: {}, events: [], chats: { baseline: [], prompt: [] }, questions: [], usage: [], genRounds: 0 };
     log('session_start', { model: C.MODEL, promptVersion: C.PROMPT_VERSION, order: S.order, placeholderPrompt: placeholder }); enterStep(); render();
   } });
-  const resume = saved && saved.events ? h('div', { class: 'warn' }, h('b', { text: 'Gespeicherte Session gefunden: ' + saved.id }), h('div', { class: 'small', text: 'Schritt ' + (saved.stepIdx + 1) + ' von ' + saved.steps.length + '. Zum Fortsetzen oben den API-Key eingeben.' }),
+  const resume = saved && saved.events ? h('div', { class: 'warn' }, h('b', { text: 'Saved session found: ' + saved.id }), h('div', { class: 'small', text: 'Step ' + (saved.stepIdx + 1) + ' of ' + saved.steps.length + '. Enter the API key above to resume.' }),
     h('div', { class: 'row', style: 'margin-top:6px' },
-      h('button', { text: 'Fortsetzen', onclick: () => { API_KEY = f.key.value.trim(); if (!API_KEY) return info('Bitte API-Key eingeben.', 'err'); S = saved; log('session_resume'); render(); } }),
-      h('button', { text: 'Verwerfen', onclick: () => { if (confirm('Gespeicherte Session löschen? Nicht exportierte Daten gehen verloren.')) { localStorage.removeItem(LS_KEY); render(); } } }))) : null;
+      h('button', { text: 'Resume', onclick: () => { API_KEY = f.key.value.trim(); if (!API_KEY) return info('Enter the API key.', 'err'); S = saved; log('session_resume'); render(); } }),
+      h('button', { text: 'Discard', onclick: () => { if (confirm('Delete the saved session? Any data not exported will be lost.')) { localStorage.removeItem(LS_KEY); render(); } } }))) : null;
   root.append(h('div', { class: 'wrap' }, h('div', { class: 'box' },
-    h('h1', { text: 'Reflexions-Studie – Setup (Versuchsleitung)' }),
-    placeholder ? h('div', { class: 'warn', text: 'Achtung: In config.js ist noch der Platzhalter-Prompt aktiv.' }) : null,
+    h('h1', { text: 'Reflection Study - Setup (Researcher)' }),
+    placeholder ? h('div', { class: 'warn', text: 'Warning: The placeholder prompt is still active in config.js.' }) : null,
     resume,
-    h('label', {}, 'Teilnehmer-ID'), f.id, h('label', {}, 'Paar-ID (optional)'), f.pair,
-    h('label', {}, 'API-Key ', h('span', { class: 'hint', text: '(wird nur im Arbeitsspeicher gehalten, nie gespeichert oder geloggt)' })), f.key,
-    h('label', { style: 'font-weight:400;display:flex;gap:8px;align-items:center' }, f.incl, 'Hochgeladene/eingefügte Arbeitstexte im exportierten Log mitspeichern (sonst nur Name, Länge und Hash)'),
+    h('label', {}, 'Participant ID'), f.id, h('label', {}, 'Pair ID (optional)'), f.pair,
+    h('label', {}, 'API key ', h('span', { class: 'hint', text: '(kept in memory only; never stored or logged)' })), f.key,
+    h('label', { style: 'font-weight:400;display:flex;gap:8px;align-items:center' }, f.incl, 'Include uploaded/pasted thesis text in the exported log (otherwise only the filename, length, and hash are saved)'),
     h('div', { class: 'row', style: 'margin-top:14px' }, testBtn, start), msg)));
 }
 function buildSteps(order) {
@@ -219,8 +219,8 @@ function buildSteps(order) {
   return [{ kind: 'phase', name: seq[0] }, { kind: 'break', after: seq[0] }, { kind: 'phase', name: seq[1] }, { kind: 'break', after: seq[1] }, { kind: 'phase', name: 'pair' }, { kind: 'break', after: 'pair' }, { kind: 'end' }];
 }
 function enterStep() { const st = curStep(); if (st.kind === 'phase' && !S.phaseTimes[st.name]) { S.phaseTimes[st.name] = { start: nowIso(), startMs: Date.now(), end: null }; log('phase_start', { name: st.name }); } }
-function endPhase(name) { if ((ui.chat && ui.chat.busy) || ui.generating) { alert('Bitte warten, bis die laufende KI-Anfrage abgeschlossen ist.'); return; } const t = S.phaseTimes[name]; if (t && !t.end) { t.end = nowIso(); t.durationSec = Math.round((Date.now() - t.startMs) / 1000); } log('phase_end', { name, durationSec: t && t.durationSec }); S.stepIdx++; enterStep(); save(); render(); }
-function loadScript(src) { return new Promise((res, rej) => { const s = h('script', { src }); s.onload = res; s.onerror = () => rej(new Error('Skript nicht ladbar')); document.head.append(s); }); }
+function endPhase(name) { if ((ui.chat && ui.chat.busy) || ui.generating) { alert('Please wait until the current AI request has finished.'); return; } const t = S.phaseTimes[name]; if (t && !t.end) { t.end = nowIso(); t.durationSec = Math.round((Date.now() - t.startMs) / 1000); } log('phase_end', { name, durationSec: t && t.durationSec }); S.stepIdx++; enterStep(); save(); render(); }
+function loadScript(src) { return new Promise((res, rej) => { const s = h('script', { src }); s.onload = res; s.onerror = () => rej(new Error('Could not load script')); document.head.append(s); }); }
 async function readFileText(file) { return /\.pdf$/i.test(file.name) ? loadPdfText(file) : file.text(); }
 async function loadPdfText(file) {
   const base = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
@@ -232,38 +232,38 @@ async function loadPdfText(file) {
   return pages.join('\n\n');
 }
 
-// ---------- Kopfzeile & Timer ----------
+// ---------- Header and timer ----------
 function header(name, withTimer) {
   const t = S.phaseTimes[name]; const limit = C.PHASE_MINUTES * 60000;
   const timer = h('span', { class: 'timer' });
   const tick = () => { if (!t) return; const el = Date.now() - t.startMs; timer.textContent = withTimer ? fmtClock(el) + ' / ' + C.PHASE_MINUTES + ':00' : fmtClock(el); timer.classList.toggle('over', withTimer && el > limit); if (withTimer && el > limit && !S.overtimeLogged?.[name]) { (S.overtimeLogged = S.overtimeLogged || {})[name] = true; log('time_limit_reached', { name }); } };
   tick(); timerHandle = setInterval(tick, 1000);
-  return h('header', { class: 'top' }, h('h1', { text: 'Teil ' + partNumber(name) + (name === 'pair' ? ': Gespräch zu zweit' : ': Reflexion mit KI') }), h('span', { class: 'small', text: 'ID ' + S.id }), h('span', { class: 'spacer' }), timer,
-    h('button', { text: 'Teil beenden', onclick: () => { if (confirm('Diesen Teil jetzt beenden?')) endPhase(name); } }));
+  return h('header', { class: 'top' }, h('h1', { text: 'Part ' + partNumber(name) + (name === 'pair' ? ': Pair discussion' : ': Reflection with AI') }), h('span', { class: 'small', text: 'ID ' + S.id }), h('span', { class: 'spacer' }), timer,
+    h('button', { text: 'End part', onclick: () => { if (confirm('End this part now?')) endPhase(name); } }));
 }
 
-// ---------- Chat-Teile (Baseline / Prompt) ----------
+// ---------- Chat parts (baseline / prompt) ----------
 function renderChatPhase(root, name) {
   const isPrompt = name === 'prompt';
   root.append(header(name, true));
   if (!isPrompt) { root.append(h('div', { class: 'grid one' }, chatColumn(name))); return; }
   if (!S.thesis) return renderThesisLoad(root);
   const thesisBody = h('div', { class: 'body' }, h('div', { class: 'thesis', id: 'thesis' }));
-  const cols = [h('section', { class: 'col' }, h('h2', { text: 'Deine Arbeit' }), thesisBody)];
+  const cols = [h('section', { class: 'col' }, h('h2', { text: 'Your thesis' }), thesisBody)];
   if (isPrompt) cols.push(questionsColumn());
   cols.push(chatColumn(name));
   root.append(h('div', { class: 'grid three' }, cols));
   ui.thesisEl = thesisBody.firstChild; refreshThesis();
 }
 function renderThesisLoad(root) {
-  const ta = h('textarea', { rows: 12, placeholder: 'Text deiner Arbeit hier einfügen …' }); const file = h('input', { type: 'file', accept: '.txt,.md,.pdf' }); const msg = h('div'); let src = 'paste', fname = '';
-  file.addEventListener('change', async () => { const f = file.files[0]; if (!f) return; msg.replaceChildren(h('div', { class: 'hint', text: 'Lese Datei …' }));
-    try { ta.value = await readFileText(f); src = 'upload'; fname = f.name; msg.replaceChildren(h('div', { class: 'hint', text: 'Datei geladen (' + ta.value.length + ' Zeichen)' })); }
-    catch (e) { msg.replaceChildren(h('div', { class: 'err', text: 'Datei konnte nicht gelesen werden (' + e.message + '). Bitte Text einfügen.' })); } });
-  root.append(h('div', { class: 'wrap' }, h('div', { class: 'box' }, h('h1', { text: 'Neuer Chat: Lade deine Arbeit' }),
-    h('p', { class: 'hint', text: 'Dies ist ein neuer Chat. Die KI weiss nichts aus dem vorherigen Teil. Lade deine Arbeit hoch oder füge den Text ein über den du reflektieren möchtest.' }),
+  const ta = h('textarea', { rows: 12, placeholder: 'Paste your thesis text here ...' }); const file = h('input', { type: 'file', accept: '.txt,.md,.pdf' }); const msg = h('div'); let src = 'paste', fname = '';
+  file.addEventListener('change', async () => { const f = file.files[0]; if (!f) return; msg.replaceChildren(h('div', { class: 'hint', text: 'Reading file ...' }));
+    try { ta.value = await readFileText(f); src = 'upload'; fname = f.name; msg.replaceChildren(h('div', { class: 'hint', text: 'File loaded (' + ta.value.length + ' characters)' })); }
+    catch (e) { msg.replaceChildren(h('div', { class: 'err', text: 'Could not read file (' + e.message + '). Please paste the text instead.' })); } });
+  root.append(h('div', { class: 'wrap' }, h('div', { class: 'box' }, h('h1', { text: 'New chat: Add your thesis' }),
+    h('p', { class: 'hint', text: 'This is a new chat. The AI does not know anything from the previous part. Upload your thesis or paste the text you want to reflect on.' }),
     file, h('div', { style: 'height:8px' }), ta, msg,
-    h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'primary', text: 'Weiter', onclick: async () => { const t = ta.value.trim(); if (t.length < 200) { msg.replaceChildren(h('div', { class: 'err', text: 'Der Text fehlt oder ist sehr kurz.' })); return; }
+    h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'primary', text: 'Continue', onclick: async () => { const t = ta.value.trim(); if (t.length < 200) { msg.replaceChildren(h('div', { class: 'err', text: 'The text is missing or very short.' })); return; }
       S.thesis = t; log('thesis_loaded', { source: src === 'upload' && t === ta.value.trim() ? 'upload' : 'paste', fileName: fname, chars: t.length, hash: await hashText(t) }); save(); render(); } })))));
 }
 function refreshThesis() {
@@ -281,19 +281,19 @@ function focusQuestion(id, target) {
   if (ui.cards && ui.cards[id]) { ui.cards[id].classList.add('active'); if (target === 'card') ui.cards[id].scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
 }
 function chatColumn(name) {
-  const list = h('div', { class: 'body' }); const input = h('textarea', { rows: 2, placeholder: 'Nachricht schreiben … (Enter = senden, Shift+Enter = Zeilenumbruch)' });
-  const send = h('button', { class: 'primary', text: 'Senden' });
+  const list = h('div', { class: 'body' }); const input = h('textarea', { rows: 2, placeholder: 'Write a message ... (Enter to send, Shift+Enter for a new line)' });
+  const send = h('button', { class: 'primary', text: 'Send' });
   ui.chat = { name, list, input, send, busy: false, pending: null };
-  const addMsg = (m) => { const el = h('div', { class: 'msg ' + m.role }, m.attachment ? h('div', {}, h('span', { class: 'att', text: '📎 ' + (m.attachment.name || 'Eingefügter Text') + ' (' + m.attachment.chars + ' Zeichen)' })) : null, m.content); list.append(el); list.scrollTop = list.scrollHeight; return el; };
+  const addMsg = (m) => { const el = h('div', { class: 'msg ' + m.role }, m.attachment ? h('div', {}, h('span', { class: 'att', text: '📎 ' + (m.attachment.name || 'Pasted text') + ' (' + m.attachment.chars + ' characters)' })) : null, m.content); list.append(el); list.scrollTop = list.scrollHeight; return el; };
   ui.chat.addMsg = addMsg; S.chats[name].forEach(addMsg);
   const chip = h('span', { class: 'small' }); const fileIn = h('input', { type: 'file', accept: '.txt,.md,.pdf', style: 'display:none' });
-  const attBtn = name === 'baseline' ? h('button', { title: 'Datei anhängen', text: '📎', onclick: () => fileIn.click() }) : null;
-  fileIn.addEventListener('change', async () => { const f = fileIn.files[0]; fileIn.value = ''; if (!f) return; chip.textContent = 'Lese ' + f.name + ' …';
-    try { const t = (await readFileText(f)).trim(); ui.chat.pending = { name: f.name, chars: t.length, text: t }; chip.replaceChildren(h('span', { class: 'att', text: '📎 ' + f.name + ' (' + t.length + ' Zeichen)' }), ' ', h('button', { style: 'padding:0 6px;font-size:12px', text: '×', onclick: () => { ui.chat.pending = null; chip.textContent = ''; } })); }
-    catch (e) { chip.textContent = 'Datei nicht lesbar: ' + e.message; } });
+  const attBtn = name === 'baseline' ? h('button', { title: 'Attach a file', text: '📎', onclick: () => fileIn.click() }) : null;
+  fileIn.addEventListener('change', async () => { const f = fileIn.files[0]; fileIn.value = ''; if (!f) return; chip.textContent = 'Reading ' + f.name + ' ...';
+    try { const t = (await readFileText(f)).trim(); ui.chat.pending = { name: f.name, chars: t.length, text: t }; chip.replaceChildren(h('span', { class: 'att', text: '📎 ' + f.name + ' (' + t.length + ' characters)' }), ' ', h('button', { style: 'padding:0 6px;font-size:12px', text: '×', onclick: () => { ui.chat.pending = null; chip.textContent = ''; } })); }
+    catch (e) { chip.textContent = 'Could not read file: ' + e.message; } });
   const doSend = () => { const t = input.value.trim(); const att = ui.chat.pending; if ((!t && !att) || ui.chat.busy) return; input.value = ''; ui.chat.pending = null; chip.textContent = ''; sendUserMessage(name, t, 'typed', null, att); };
   send.addEventListener('click', doSend); input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); } });
-  const hint = name === 'baseline' ? h('div', { class: 'hint', style: 'padding:10px 14px;border-bottom:1px solid var(--line)', text: 'Nutze diesen Chat so, wie du einen KI-Chat normalerweise zur Reflexion deiner Arbeit nutzen würdest. Du kannst über die ganze Arbeit oder einzelne Teile nachdenken, Fragen stellen, Gedanken prüfen oder Unklarheiten besprechen. Entscheide selbst, worüber und wie du sprechen möchtest. Lade deine Arbeit mit 📎 hoch (.pdf, .txt, .md) oder füge den relevanten Text ein.' }) : null;
+  const hint = name === 'baseline' ? h('div', { class: 'hint', style: 'padding:10px 14px;border-bottom:1px solid var(--line)', text: 'Use this chat as you normally would to reflect on your thesis with an AI chat. You can think about the whole thesis or individual parts, ask questions, examine your ideas, or discuss uncertainties. Choose for yourself what to discuss and how. Upload your thesis with 📎 (.pdf, .txt, .md) or paste the relevant text.' }) : null;
   return h('section', { class: 'col' }, ...[h('h2', { text: 'Chat' }), hint, list, name === 'baseline' ? h('div', { style: 'padding:0 10px' }, chip, fileIn) : null, h('div', { class: 'composer' }, ...[attBtn, input, send].filter(Boolean))].filter(Boolean));
 }
 function setBusy(b) { ui.chat.busy = b; ui.chat.send.disabled = b; ui.chat.input.disabled = b; }
@@ -307,26 +307,26 @@ async function runAssistant(name) {
   const el = h('div', { class: 'msg assistant', text: '…' }); chat.list.append(el); chat.list.scrollTop = chat.list.scrollHeight;
   const t0 = Date.now();
   try {
-    const r = await callClaude({ webSearch: !!(C.WEB_SEARCH && C.WEB_SEARCH[name]), onStatus: (s) => { if (el.dataset.started !== '1') el.textContent = '… ' + s; }, system: systemBlocks(name === 'baseline' ? 'baseline' : 'chat'), messages: S.chats[name].map(m => ({ role: m.role, content: m.attachment ? '<dokument name="' + m.attachment.name + '">\n' + m.attachment.text + '\n</dokument>' + (m.content ? '\n\n' + m.content : '') : m.content })), maxTokens: C.MAX_TOKENS_CHAT, onDelta: (t) => { el.dataset.started = '1'; el.textContent = t; chat.list.scrollTop = chat.list.scrollHeight; } });
+    const r = await callClaude({ webSearch: !!(C.WEB_SEARCH && C.WEB_SEARCH[name]), onStatus: (s) => { if (el.dataset.started !== '1') el.textContent = '… ' + s; }, system: systemBlocks(name === 'baseline' ? 'baseline' : 'chat'), messages: S.chats[name].map(m => ({ role: m.role, content: m.attachment ? '<document name="' + m.attachment.name + '">\n' + m.attachment.text + '\n</document>' + (m.content ? '\n\n' + m.content : '') : m.content })), maxTokens: C.MAX_TOKENS_CHAT, onDelta: (t) => { el.dataset.started = '1'; el.textContent = t; chat.list.scrollTop = chat.list.scrollHeight; } });
     const msg = { role: 'assistant', content: r.text, t: nowIso(), latencyMs: Date.now() - t0, stop: r.stop, webSearches: r.searches }; S.chats[name].push(msg);
     S.usage.push({ t: msg.t, kind: 'chat_' + name, ...r.usage }); log('chat_assistant', { chars: r.text.length, latencyMs: msg.latencyMs, stop: r.stop, webSearches: r.searches });
   } catch (e) {
     el.remove(); log('api_error', { where: 'chat', message: e.message });
-    chat.list.append(h('div', { class: 'err' }, e.message + ' ', h('button', { text: 'Erneut versuchen', onclick: () => runAssistant(name) }))); chat.list.scrollTop = chat.list.scrollHeight;
+    chat.list.append(h('div', { class: 'err' }, e.message + ' ', h('button', { text: 'Try again', onclick: () => runAssistant(name) }))); chat.list.scrollTop = chat.list.scrollHeight;
   } finally { setBusy(false); chat.input.focus(); }
 }
 
-// ---------- Fragen-Spalte (Prompt-Teil) ----------
+// ---------- Questions column (prompt part) ----------
 function questionsColumn() {
   const body = h('div', { class: 'body' }); const counts = h('div', { class: 'small' }); const msg = h('div');
-  const gen = h('button', { class: 'primary', text: S.questions.length ? 'Weitere Fragen' : 'Stellen markieren & Fragen erzeugen' });
+  const gen = h('button', { class: 'primary', text: S.questions.length ? 'Generate more questions' : 'Mark passages & generate questions' });
   ui.cards = {}; ui.qBody = body;
   const updateCounts = () => { const c = { open: 0, later: 0, discussed: 0, dismissed: 0 }; S.questions.forEach(q => c[q.status]++); counts.textContent = Object.keys(STATUS).map(k => STATUS[k] + ' ' + c[k]).join(' · '); };
   ui.updateCounts = updateCounts;
   gen.addEventListener('click', async () => {
-    gen.disabled = true; ui.generating = true; msg.replaceChildren(h('div', { class: 'hint', text: 'Die KI liest deine Arbeit … das dauert einen Moment.' })); const t0 = Date.now(); const round = ++S.genRounds;
+    gen.disabled = true; ui.generating = true; msg.replaceChildren(h('div', { class: 'hint', text: 'The AI is reading your thesis ... this may take a moment.' })); const t0 = Date.now(); const round = ++S.genRounds;
     const already = S.questions.map(q => '- ' + q.passage.slice(0, 120)).join('\n');
-    const userMsg = round === 1 ? 'Bitte markiere jetzt passende Stellen in meiner Arbeit und stelle dazu Reflexionsfragen.' : 'Bitte markiere weitere passende Stellen, die noch nicht abgedeckt sind, und stelle dazu Reflexionsfragen. Bereits verwendete Stellen:\n' + already;
+    const userMsg = round === 1 ? 'Please identify relevant passages in my thesis and ask reflection questions about them.' : 'Please identify additional relevant passages that have not been covered yet and ask reflection questions about them. Passages already used:\n' + already;
     log('generate_start', { round });
     try {
       const r = await callClaude({ system: systemBlocks('generate'), messages: [{ role: 'user', content: userMsg }], maxTokens: C.MAX_TOKENS_GENERATE });
@@ -337,16 +337,16 @@ function questionsColumn() {
         S.questions.push(q);
       }
       log('generate_done', { round, items: items.length, passagesFound: found, latencyMs: Date.now() - t0, stop: r.stop });
-      msg.replaceChildren(found < items.length ? h('div', { class: 'hint', text: (items.length - found) + ' Frage(n) ohne auffindbare Textstelle (werden ohne Markierung gezeigt).' }) : '');
-      gen.textContent = 'Weitere Fragen'; renderCards(); refreshThesis();
-    } catch (e) { S.genRounds--; log('api_error', { where: 'generate', message: e.message }); msg.replaceChildren(h('div', { class: 'err', text: e.message + ' – bitte nochmals versuchen.' })); }
+      msg.replaceChildren(found < items.length ? h('div', { class: 'hint', text: (items.length - found) + ' question(s) without a matching passage (shown without a highlight).' }) : '');
+      gen.textContent = 'Generate more questions'; renderCards(); refreshThesis();
+    } catch (e) { S.genRounds--; log('api_error', { where: 'generate', message: e.message }); msg.replaceChildren(h('div', { class: 'err', text: e.message + ' - please try again.' })); }
     finally { gen.disabled = false; ui.generating = false; }
   });
   ui.renderCards = renderCards;
   function renderCards() { body.replaceChildren(); ui.cards = {}; S.questions.forEach((q, i) => { const c = questionCard(q, i + 1); ui.cards[q.id] = c; body.append(c); }); updateCounts(); }
   renderCards();
   return h('section', { class: 'col' }, h('h2', { text: 'Fragen' }), h('div', { style: 'padding:10px 14px;border-bottom:1px solid var(--line)' },
-    h('p', { class: 'hint', text: 'Ziel ist, über deine Arbeit und deine Entscheidungen zu reflektieren. Lass dazu Fragen zu passenden Stellen erzeugen und besprich sie im Chat, markiere sie als «Schon besprochen» oder «Für später» oder verwirf sie mit einem passenden Grund.' }),
+    h('p', { class: 'hint', text: 'The goal is to reflect on your thesis and the decisions you have made. Generate questions about relevant passages, discuss them in the chat, mark them as "Discussed" or "For later", or dismiss them with a suitable reason.' }),
     h('div', { class: 'row' }, gen, h('span', { class: 'spacer' })), msg, counts), body);
 }
 function questionCard(q, n) {
@@ -357,19 +357,19 @@ function questionCard(q, n) {
     card.className = 'q' + (q.status !== 'open' ? ' done' : '') + (card.classList.contains('active') ? ' active' : ''); drawBtns(); drawMore(); ui.updateCounts && ui.updateCounts();
   };
   const btns = h('div', { class: 'btns' });
-  const drawBtns = () => { btns.replaceChildren(h('button', { text: 'Im Chat vertiefen', onclick: () => { if (ui.chat && !ui.chat.busy) sendUserMessage('prompt', 'Ich möchte diese Frage vertiefen:\n«' + q.question + '»\n(Stelle in meiner Arbeit: «' + q.passage + '»)', 'question', q.id); } }),
+  const drawBtns = () => { btns.replaceChildren(h('button', { text: 'Discuss in chat', onclick: () => { if (ui.chat && !ui.chat.busy) sendUserMessage('prompt', 'I would like to explore this question further:\n"' + q.question + '"\n(Passage from my thesis: "' + q.passage + '")', 'question', q.id); } }),
     ...['discussed', 'later', 'dismissed'].map(s => h('button', { class: q.status === s ? 'active' : '', text: STATUS[s], onclick: () => setStatus(s) }))); };
   const drawMore = () => {
     more.replaceChildren(); if (q.status === 'open') return;
     if (q.status === 'dismissed') more.append(h('div', { class: 'chips' }, DISMISS_REASONS.map(r => h('button', { class: q.reason === r ? 'active' : '', text: r, onclick: () => { q.reason = q.reason === r ? '' : r; log('question_reason', { questionId: q.id, reason: q.reason }); save(); drawMore(); } }))));
-    const ph = q.status === 'discussed' ? 'Wo / mit wem besprochen? (optional)' : q.status === 'later' ? 'Notiz (optional)' : 'Kurz begründen (optional)';
+    const ph = q.status === 'discussed' ? 'Where / with whom did you discuss it? (optional)' : q.status === 'later' ? 'Note (optional)' : 'Brief reason (optional)';
     more.append(h('textarea', { rows: 1, placeholder: ph, value: q.reasonText, onchange: (e) => { q.reasonText = e.target.value; log('question_note', { questionId: q.id, chars: q.reasonText.length, text: q.reasonText }); save(); } }));
   };
-  card.append(h('div', { class: 'small', text: 'Frage ' + n }), q.found && !q.overlap ? h('div', { class: 'cite', text: '«' + (q.passage.length > 160 ? q.passage.slice(0, 160) + '…' : q.passage) + '»', onclick: () => focusQuestion(q.id, 'mark') }) : h('div', { class: 'cite', text: q.found ? '(Stelle überlappt mit einer anderen Markierung) «' + q.passage.slice(0, 100) + '…»' : '(Keine Markierung möglich) «' + q.passage.slice(0, 100) + '»' }), h('div', { class: 'text', text: q.question }), btns, more);
+  card.append(h('div', { class: 'small', text: 'Question ' + n }), q.found && !q.overlap ? h('div', { class: 'cite', text: '"' + (q.passage.length > 160 ? q.passage.slice(0, 160) + '...' : q.passage) + '"', onclick: () => focusQuestion(q.id, 'mark') }) : h('div', { class: 'cite', text: q.found ? '(Passage overlaps with another highlight) "' + q.passage.slice(0, 100) + '..."' : '(Could not highlight passage) "' + q.passage.slice(0, 100) + '"' }), h('div', { class: 'text', text: q.question }), btns, more);
   drawBtns(); drawMore(); return card;
 }
 
-// ---------- Paar-Teil: Reflection Map ----------
+// ---------- Pair part: reflection map ----------
 function renderPair(root) {
   root.append(header('pair', false));
   const cols = {}; const body = {};
@@ -381,39 +381,39 @@ function renderPair(root) {
       const card = h('div', { class: 'card' + (q.pairDiscussed ? ' taken' : '') });
       const sel = h('select', { style: 'width:auto;font-size:12px;padding:2px 4px' }, Object.keys(STATUS).map(k => h('option', { value: k, text: STATUS[k], selected: k === q.status })));
       sel.addEventListener('change', () => { const from = q.status; if (!q.pairOrigStatus) q.pairOrigStatus = from; q.status = sel.value; log('pair_status_change', { questionId: q.id, from, to: q.status }); save(); draw(); });
-      const tk = h('button', { class: q.pairDiscussed ? 'active' : '', style: 'font-size:12px;padding:2px 8px', text: q.pairDiscussed ? 'Im Gespräch aufgegriffen ✓' : 'Im Gespräch aufgegriffen', onclick: () => { q.pairDiscussed = !q.pairDiscussed; log('pair_discussed', { questionId: q.id, value: q.pairDiscussed }); save(); draw(); } });
-      card.append(...[h('div', { class: 'small', text: 'Frage ' + (i + 1) }), h('div', { style: 'font-weight:600;margin:2px 0 4px', text: q.question }),
-        h('div', { class: 'small', text: '«' + (q.passage.length > 140 ? q.passage.slice(0, 140) + '…' : q.passage) + '»' }),
-        q.reason ? h('div', {}, h('span', { class: 'tag', text: q.reason })) : null, q.reasonText ? h('div', { class: 'small', text: 'Notiz: ' + q.reasonText }) : null,
-        q.pairOrigStatus ? h('div', { class: 'small', text: 'Ursprünglich: ' + STATUS[q.pairOrigStatus] }) : null,
+      const tk = h('button', { class: q.pairDiscussed ? 'active' : '', style: 'font-size:12px;padding:2px 8px', text: q.pairDiscussed ? 'Discussed ✓' : 'Discussed', onclick: () => { q.pairDiscussed = !q.pairDiscussed; log('pair_discussed', { questionId: q.id, value: q.pairDiscussed }); save(); draw(); } });
+      card.append(...[h('div', { class: 'small', text: 'Question ' + (i + 1) }), h('div', { style: 'font-weight:600;margin:2px 0 4px', text: q.question }),
+        h('div', { class: 'small', text: '"' + (q.passage.length > 140 ? q.passage.slice(0, 140) + '...' : q.passage) + '"' }),
+        q.reason ? h('div', {}, h('span', { class: 'tag', text: q.reason })) : null, q.reasonText ? h('div', { class: 'small', text: 'Note: ' + q.reasonText }) : null,
+        q.pairOrigStatus ? h('div', { class: 'small', text: 'Originally: ' + STATUS[q.pairOrigStatus] }) : null,
         h('div', { class: 'row', style: 'margin-top:6px' }, tk, h('span', { class: 'spacer' }), sel)].filter(Boolean));
       body[q.status].append(card);
     });
     Object.keys(STATUS).forEach(k => { cols[k].querySelector('h2').textContent = STATUS[k] + ' (' + S.questions.filter(q => q.status === k).length + ')'; });
   };
   root.append(map); draw();
-  if (!S.questions.length) root.append(h('div', { class: 'wrap' }, h('div', { class: 'warn', text: 'Auf diesem Gerät wurden keine Fragen erzeugt.' })));
+  if (!S.questions.length) root.append(h('div', { class: 'wrap' }, h('div', { class: 'warn', text: 'No questions were generated on this device.' })));
 }
 
-// ---------- Pause / Ende ----------
+// ---------- Break / end ----------
 function renderBreak(root, after) {
   const url = C.QUESTIONNAIRE && C.QUESTIONNAIRE['after_' + after]; const n = partNumber(after);
   const nextStepHint = after === 'pair'
-    ? 'Bitte fülle zuerst den Fragebogen zu diesem Teil aus. Kehre danach hierher zurück und klicke auf «Weiter», um die Studie abzuschliessen.'
+    ? 'Please complete the questionnaire for this part first. Then return here and click "Continue" to finish the study.'
     : after === 'prompt'
-      ? 'Bitte fülle zuerst den Fragebogen zu diesem Teil aus und melde dich danach bei mir. Anschliessend kannst du auf «Weiter» klicken, um mit Teil 3 zu beginnen.'
-    : 'Bitte fülle zuerst den Fragebogen zu diesem Teil aus. Kehre danach hierher zurück und klicke auf «Weiter», um mit dem nächsten Teil zu beginnen.';
-  root.append(h('div', { class: 'wrap' }, h('div', { class: 'box' }, h('h1', { text: 'Teil ' + n + ' beendet' }),
+      ? 'Please complete the questionnaire for this part first, then contact me. After that, click "Continue" to begin Part 3.'
+    : 'Please complete the questionnaire for this part first. Then return here and click "Continue" to begin the next part.';
+  root.append(h('div', { class: 'wrap' }, h('div', { class: 'box' }, h('h1', { text: 'Part ' + n + ' complete' }),
     h('p', { text: nextStepHint }),
-    url ? h('p', {}, h('a', { href: url, target: '_blank', rel: 'noopener', text: 'Fragebogen öffnen' })) : h('div', { class: 'warn', text: 'Kein Fragebogen-Link in config.js hinterlegt (QUESTIONNAIRE.after_' + after + ').' }),
-    h('div', { class: 'row' }, h('button', { text: 'Log sichern (Zwischenstand)', onclick: () => doExport('teil' + n) }), h('button', { class: 'primary', text: 'Weiter', onclick: () => { log('break_continue', { after }); S.stepIdx++; enterStep(); save(); render(); if (curStep().kind === 'end' && !S.finalExported) { S.finalExported = true; doExport('final'); } } })))));
+    url ? h('p', {}, h('a', { href: url, target: '_blank', rel: 'noopener', text: 'Open questionnaire' })) : h('div', { class: 'warn', text: 'No questionnaire link configured in config.js (QUESTIONNAIRE.after_' + after + ').' }),
+    h('div', { class: 'row' }, h('button', { text: 'Save log (interim)', onclick: () => doExport('part' + n) }), h('button', { class: 'primary', text: 'Continue', onclick: () => { log('break_continue', { after }); S.stepIdx++; enterStep(); save(); render(); if (curStep().kind === 'end' && !S.finalExported) { S.finalExported = true; doExport('final'); } } })))));
 }
 function renderEnd(root) {
-  root.append(h('div', { class: 'wrap' }, h('div', { class: 'box' }, h('h1', { text: 'Fertig – danke!' }),
-    h('p', { text: 'Das Log wurde automatisch als JSON-Datei heruntergeladen (Downloads-Ordner).' }),
-    h('p', { class: 'hint', text: 'Versuchsleitung: Datei prüfen, dann alle lokalen Daten löschen. Falls kein Download erschien, hier nochmals herunterladen.' }),
-    h('div', { class: 'row' }, h('button', { text: 'Log nochmals herunterladen', onclick: () => doExport('final') }),
-      h('button', { text: 'Alle lokalen Daten auf diesem Gerät löschen', onclick: () => { if (confirm('Wirklich alles löschen? Nicht exportierte Daten sind danach weg.')) { localStorage.removeItem(LS_KEY); S = null; API_KEY = ''; render(); } } })))));
+  root.append(h('div', { class: 'wrap' }, h('div', { class: 'box' }, h('h1', { text: 'Complete - thank you!' }),
+    h('p', { text: 'The log was automatically downloaded as a JSON file to your Downloads folder.' }),
+    h('p', { class: 'hint', text: 'Researcher: check the file, then delete all local data. If the download did not appear, download it again here.' }),
+    h('div', { class: 'row' }, h('button', { text: 'Download log again', onclick: () => doExport('final') }),
+      h('button', { text: 'Delete all local data on this device', onclick: () => { if (confirm('Delete everything? Any data not exported will be lost.')) { localStorage.removeItem(LS_KEY); S = null; API_KEY = ''; render(); } } })))));
 }
 
 render();

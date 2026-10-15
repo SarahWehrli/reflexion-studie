@@ -1,28 +1,23 @@
-# Reflexions-Studie – lokale Web-App
+# Reflection Study - Local Web App
 
-## Vor der Studie (einmalig)
-1. `config.js` öffnen und bei `PROMPT_TEXT` deinen System Prompt einfügen (Platzhalter ersetzen).
-2. Optional: Fragebogen-Links bei `QUESTIONNAIRE` eintragen.
-3. Im Claude Console einen **eigenen Key nur für die Studie** anlegen, mit tiefem Ausgabenlimit. Nach der letzten Session löschen.
+## Before the study (one-time setup)
+1. Open `config.js` and replace the placeholder in `PROMPT_TEXT` with your system prompt.
+2. Optionally add questionnaire links under `QUESTIONNAIRE`.
+3. In the Anthropic Console, create a dedicated API key for the study with a low spending limit. Delete it after the final session.
 
-## Pro Session (Versuchsleitung)
-1. github Seite öffnen
-2. ID und API-Key eintippen, «Key & Verbindung testen», dann «Session starten».
-3. Ablauf (feste Reihenfolge): Teil 1 = Baseline: eigener Chat ohne System Prompt, Studierende laden ihre Arbeit
-   selbst hoch (📎) oder fügen Text ein → Fragebogen → Teil 2 = neuer Chat mit deinem Prompt, Arbeit wird zu Beginn
-   erneut hochgeladen/eingefügt (die KI weiss nichts aus Teil 1) → Fragebogen → Teil 3 (Paar) → Fragebogen → Ende.
-   Der Timer ist eine Richtzeit; Teile werden über «Teil beenden» abgeschlossen.
-4. Am Ende wird das Log **automatisch** als JSON in den Downloads-Ordner gespeichert. Prüfen, dann **«Alle lokalen Daten löschen»**.
+## For each session (researcher)
+1. Open the hosted page.
+2. Enter the participant ID and API key, select "Test key and connection", then select "Start session".
+3. Follow the fixed order: Part 1 is the baseline chat without a system prompt. Participants upload their thesis or paste text, then complete the questionnaire. Part 2 starts a new chat with your prompt; the thesis is uploaded or pasted again, so the AI has no knowledge of Part 1. After its questionnaire, participants contact the researcher before continuing to Part 3 (pair discussion), followed by the final questionnaire. The timer is a suggested duration; participants end each part using "End part".
+4. At the end, the log is automatically downloaded as a JSON file to the Downloads folder. Check it, then select "Delete all local data on this device".
 
-## Was geloggt wird
-Chatverläufe beider Teile, alle Fragen mit Textstelle, Status (besprochen / später / verworfen),
-Verwerfungsgrund und Notiz, Änderungen im Paar-Teil (mit ursprünglichem Status), «im Gespräch aufgegriffen»,
-Zeitstempel, Modell, Prompt-Version, Token-Verbrauch. **Nicht geloggt:** der API-Key.
-Die Arbeit selbst nur, wenn im Setup angehakt (sonst nur Länge + Hash).
+## What is recorded
+Chat interactions from Parts 1 and 2; generated questions and their passages; question statuses, dismissal reasons, and notes; changes made during the pair discussion; timestamps; model and prompt version; and token usage. The API key is never recorded.
 
-## Sicherheit
-Der Key wird nur im Arbeitsspeicher gehalten (weg beim Schliessen/Neuladen des Tabs) und nie in der ZIP gespeichert.
-Bei einem Neuladen kann die Session mit erneuter Key-Eingabe fortgesetzt werden (Zustand liegt im localStorage).
+Thesis text is included in the exported log only when the option is selected during setup. Otherwise, uploaded attachments include only the filename and character count; the text is omitted.
 
-## PDF-Upload
-Braucht Internet (lädt pdf.js von cdnjs). 
+## Security
+The API key is held in memory only and is never stored in the log. It is cleared when the tab is closed or reloaded. After a reload, a session can be resumed by entering the key again; session state is stored in `localStorage`.
+
+## PDF uploads
+An internet connection is required to load pdf.js from cdnjs.
