@@ -3,12 +3,15 @@
 const C = window.CONFIG;
 const LS_KEY = 'reflexions-studie-session-v1';
 const API_URL = 'https://api.anthropic.com/v1/messages';
+const VISUAL_DB_NAME = 'reflexion-study-visual-files';
+const MAX_VISUAL_BYTES = 18 * 1024 * 1024;
 const STATUS = { open:'Open', later:'For later', discussed:'Discussed', dismissed:'Dismissed' };
 const DISMISS_REASONS = ['Already considered', 'Question does not fit', 'Passage does not fit', 'Not relevant', 'Other'];
 
 let API_KEY = '';       // Kept in memory only; never stored or logged
 let S = null;           // Session state
 let timerHandle = null;
+let visualDbPromise = null;
 let ui = {};            // References to current DOM elements
 
 // ---------- Helpers ----------
@@ -44,6 +47,62 @@ function cyrb53(str) { let h1 = 0xdeadbeef, h2 = 0x41c6ce57; for (let i = 0; i <
 async function hashText(t) {
   try { if (window.crypto && crypto.subtle) { const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t)); return 'sha256:' + Array.from(new Uint8Array(b)).map(x => x.toString(16).padStart(2, '0')).join(''); } } catch (e) { /* Fallback */ }
   return 'cyrb53:' + cyrb53(t);
+}
+function visualFileMediaType(file) {
+  if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) return 'application/pdf';
+  const byExtension = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' };
+  const ext = file.name.split('.').pop().toLowerCase();
+  return byExtension[ext] || (Object.values(byExtension).includes(file.type) ? file.type : null);
+}
+function openVisualDb() {
+  if (!window.indexedDB) return Promise.reject(new Error('This browser cannot store visual files for the session.'));
+  if (!visualDbPromise) visualDbPromise = new Promise((resolve, reject) => {
+    const req = window.indexedDB.open(VISUAL_DB_NAME, 1);
+    req.onupgradeneeded = () => { if (!req.result.objectStoreNames.contains('files')) req.result.createObjectStore('files'); };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => { visualDbPromise = null; reject(req.error || new Error('Could not open visual file storage.')); };
+  });
+  return visualDbPromise;
+}
+function visualDbRequest(mode, method, key, value) {
+  return openVisualDb().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction('files', mode); const store = tx.objectStore('files');
+    const req = method === 'put' ? store.put(value, key) : method === 'get' ? store.get(key) : method === 'delete' ? store.delete(key) : store.clear();
+    let result;
+    if (method === 'get') req.onsuccess = () => { result = req.result; };
+    tx.oncomplete = () => resolve(result);
+    tx.onerror = () => reject(tx.error || new Error('Could not access visual file storage.'));
+    tx.onabort = () => reject(tx.error || new Error('Visual file storage was interrupted.'));
+  }));
+}
+async function storeVisualFile(file, existingBytes) {
+  if (file.size + (existingBytes || 0) > MAX_VISUAL_BYTES) throw new Error('Visual files must total no more than 18 MB per chat. Please compress the file or use text only.');
+  const id = 'visual-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+  await visualDbRequest('readwrite', 'put', id, file);
+  return id;
+}
+async function deleteVisualFile(id) { if (id) await visualDbRequest('readwrite', 'delete', id); }
+async function clearVisualFiles() { await visualDbRequest('readwrite', 'clear'); }
+async function visualBlock(ref) {
+  const file = await visualDbRequest('readonly', 'get', ref.id);
+  if (!file) throw new Error('The visual file is no longer available in this browser. Please upload it again.');
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',').pop());
+    reader.onerror = () => reject(reader.error || new Error('Could not read the visual file.')); reader.readAsDataURL(file);
+  });
+  return { type: ref.mediaType === 'application/pdf' ? 'document' : 'image', source: { type: 'base64', media_type: ref.mediaType, data: dataUrl } };
+}
+async function messageContent(text, attachment, extraVisual) {
+  const blocks = []; const visual = (attachment && attachment.visual) || extraVisual;
+  if (visual) blocks.push(await visualBlock(visual));
+  if (attachment && attachment.text) blocks.push({ type: 'text', text: '<document name="' + attachment.name + '">\n' + attachment.text + '\n</document>' });
+  if (text) blocks.push({ type: 'text', text });
+  if (!blocks.length) return '';
+  return blocks.length === 1 && blocks[0].type === 'text' ? blocks[0].text : blocks;
+}
+function attachmentLabel(attachment) {
+  const detail = attachment.visual ? attachment.visual.mediaType === 'application/pdf' ? 'PDF visuals + ' + attachment.chars + ' characters' : 'image' : attachment.chars + ' characters';
+  return '📎 ' + attachment.name + ' (' + detail + ')';
 }
 
 // ---------- API ----------
@@ -135,7 +194,7 @@ async function buildExport() {
         at: m.t, type: 'chat_message', role: m.role, content: m.content,
         ...(m.source ? { source: m.source } : {}),
         ...(m.questionId ? { questionId: m.questionId } : {}),
-        ...(m.attachment ? { attachment: { name: m.attachment.name, chars: m.attachment.chars, text: S.includeThesis ? m.attachment.text : null } } : {})
+        ...(m.attachment ? { attachment: { name: m.attachment.name, chars: m.attachment.chars, visualMediaType: m.attachment.visual ? m.attachment.visual.mediaType : null, text: S.includeThesis ? m.attachment.text : null } } : {})
       }));
     }
     if (name === 'prompt') {
@@ -198,15 +257,15 @@ function renderSetup(root) {
   const start = h('button', { class: 'primary', text: 'Start session', onclick: async () => {
     API_KEY = f.key.value.trim(); const id = f.id.value.trim();
     if (!id) return info('Enter the participant ID.', 'err'); if (!API_KEY) return info('Enter the API key.', 'err');
-    S = { v: 1, id, pairId: f.pair.value.trim(), order: 'AB', thesis: '', includeThesis: f.incl.checked, steps: buildSteps('AB'), stepIdx: 0, startedMs: Date.now(), phaseTimes: {}, events: [], chats: { baseline: [], prompt: [] }, questions: [], usage: [], genRounds: 0 };
+    S = { v: 1, id, pairId: f.pair.value.trim(), order: 'AB', thesis: '', thesisVisual: null, includeThesis: f.incl.checked, steps: buildSteps('AB'), stepIdx: 0, startedMs: Date.now(), phaseTimes: {}, events: [], chats: { baseline: [], prompt: [] }, questions: [], usage: [], genRounds: 0 };
     log('session_start', { model: C.MODEL, promptVersion: C.PROMPT_VERSION, order: S.order, placeholderPrompt: placeholder }); enterStep(); render();
   } });
   const resume = saved && saved.events ? h('div', { class: 'warn' }, h('b', { text: 'Saved session found: ' + saved.id }), h('div', { class: 'small', text: 'Step ' + (saved.stepIdx + 1) + ' of ' + saved.steps.length + '. Enter the API key above to resume.' }),
     h('div', { class: 'row', style: 'margin-top:6px' },
       h('button', { text: 'Resume', onclick: () => { API_KEY = f.key.value.trim(); if (!API_KEY) return info('Enter the API key.', 'err'); S = saved; log('session_resume'); render(); } }),
-      h('button', { text: 'Discard', onclick: () => { if (confirm('Delete the saved session? Any data not exported will be lost.')) { localStorage.removeItem(LS_KEY); render(); } } }))) : null;
+      h('button', { text: 'Discard', onclick: async () => { if (confirm('Delete the saved session? Any data not exported will be lost.')) { localStorage.removeItem(LS_KEY); await clearVisualFiles().catch(() => {}); render(); } } }))) : null;
   root.append(h('div', { class: 'wrap' }, h('div', { class: 'box' },
-    h('h1', { text: 'Reflection Study - Setup (Researcher)' }),
+    h('h1', { text: 'Reflection Study' }),
     placeholder ? h('div', { class: 'warn', text: 'Warning: The placeholder prompt is still active in config.js.' }) : null,
     resume,
     h('label', {}, 'Participant ID'), f.id, h('label', {}, 'Pair ID (optional)'), f.pair,
@@ -218,10 +277,34 @@ function buildSteps(order) {
   const seq = order === 'AB' ? ['baseline', 'prompt'] : ['prompt', 'baseline'];
   return [{ kind: 'phase', name: seq[0] }, { kind: 'break', after: seq[0] }, { kind: 'phase', name: seq[1] }, { kind: 'break', after: seq[1] }, { kind: 'phase', name: 'pair' }, { kind: 'break', after: 'pair' }, { kind: 'end' }];
 }
-function enterStep() { const st = curStep(); if (st.kind === 'phase' && !S.phaseTimes[st.name]) { S.phaseTimes[st.name] = { start: nowIso(), startMs: Date.now(), end: null }; log('phase_start', { name: st.name }); } }
-function endPhase(name) { if ((ui.chat && ui.chat.busy) || ui.generating) { alert('Please wait until the current AI request has finished.'); return; } const t = S.phaseTimes[name]; if (t && !t.end) { t.end = nowIso(); t.durationSec = Math.round((Date.now() - t.startMs) / 1000); } log('phase_end', { name, durationSec: t && t.durationSec }); S.stepIdx++; enterStep(); save(); render(); }
+function enterStep() {
+  const st = curStep();
+  if (st.kind !== 'phase') return;
+  let t = S.phaseTimes[st.name];
+  if (!t) { t = S.phaseTimes[st.name] = { start: nowIso(), startMs: Date.now(), elapsedMs: 0, end: null }; log('phase_start', { name: st.name }); }
+  else if (t.end || !t.startMs) { t.elapsedMs = t.elapsedMs ?? (t.durationSec || 0) * 1000; t.startMs = Date.now(); t.end = null; log('phase_resume', { name: st.name }); }
+}
+function endPhase(name) {
+  if ((ui.chat && ui.chat.busy) || ui.generating) { alert('Please wait until the current AI request has finished.'); return; }
+  const t = S.phaseTimes[name];
+  if (t && !t.end) {
+    if (t.startMs) { t.elapsedMs = (t.elapsedMs || 0) + Date.now() - t.startMs; t.startMs = null; }
+    t.end = nowIso(); t.durationSec = Math.round((t.elapsedMs || 0) / 1000);
+  }
+  log('phase_end', { name, durationSec: t && t.durationSec }); S.stepIdx++; enterStep(); save(); render();
+}
+function goBack() {
+  if (S.stepIdx <= 0) return;
+  if ((ui.chat && ui.chat.busy) || ui.generating) { alert('Please wait until the current AI request has finished.'); return; }
+  const st = curStep();
+  if (st.kind === 'phase') {
+    const t = S.phaseTimes[st.name];
+    if (t && t.startMs) { t.elapsedMs = (t.elapsedMs || 0) + Date.now() - t.startMs; t.startMs = null; log('phase_pause', { name: st.name }); }
+  }
+  S.stepIdx--; enterStep(); save(); render();
+}
 function loadScript(src) { return new Promise((res, rej) => { const s = h('script', { src }); s.onload = res; s.onerror = () => rej(new Error('Could not load script')); document.head.append(s); }); }
-async function readFileText(file) { return /\.pdf$/i.test(file.name) ? loadPdfText(file) : file.text(); }
+async function readFileText(file) { return visualFileMediaType(file) === 'application/pdf' ? loadPdfText(file) : visualFileMediaType(file) ? '' : file.text(); }
 async function loadPdfText(file) {
   const base = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
   if (!window.pdfjsLib) await loadScript(base + 'pdf.min.js');
@@ -236,9 +319,10 @@ async function loadPdfText(file) {
 function header(name, withTimer) {
   const t = S.phaseTimes[name]; const limit = C.PHASE_MINUTES * 60000;
   const timer = h('span', { class: 'timer' });
-  const tick = () => { if (!t) return; const el = Date.now() - t.startMs; timer.textContent = withTimer ? fmtClock(el) + ' / ' + C.PHASE_MINUTES + ':00' : fmtClock(el); timer.classList.toggle('over', withTimer && el > limit); if (withTimer && el > limit && !S.overtimeLogged?.[name]) { (S.overtimeLogged = S.overtimeLogged || {})[name] = true; log('time_limit_reached', { name }); } };
+  const tick = () => { if (!t) return; const el = (t.elapsedMs || 0) + (t.startMs ? Date.now() - t.startMs : 0); timer.textContent = withTimer ? fmtClock(el) + ' / ' + C.PHASE_MINUTES + ':00' : fmtClock(el); timer.classList.toggle('over', withTimer && el > limit); if (withTimer && el > limit && !S.overtimeLogged?.[name]) { (S.overtimeLogged = S.overtimeLogged || {})[name] = true; log('time_limit_reached', { name }); } };
   tick(); timerHandle = setInterval(tick, 1000);
   return h('header', { class: 'top' }, h('h1', { text: 'Part ' + partNumber(name) + (name === 'pair' ? ': Pair discussion' : ': Reflection with AI') }), h('span', { class: 'small', text: 'ID ' + S.id }), h('span', { class: 'spacer' }), timer,
+    S.stepIdx > 0 ? h('button', { text: 'Back', onclick: goBack }) : null,
     h('button', { text: 'End part', onclick: () => { if (confirm('End this part now?')) endPhase(name); } }));
 }
 
@@ -256,15 +340,23 @@ function renderChatPhase(root, name) {
   ui.thesisEl = thesisBody.firstChild; refreshThesis();
 }
 function renderThesisLoad(root) {
-  const ta = h('textarea', { rows: 12, placeholder: 'Paste your thesis text here ...' }); const file = h('input', { type: 'file', accept: '.txt,.md,.pdf' }); const msg = h('div'); let src = 'paste', fname = '';
+  const ta = h('textarea', { rows: 12, placeholder: 'Paste your thesis text here ...' }); const file = h('input', { type: 'file', accept: '.txt,.md,.pdf,.png,.jpg,.jpeg,.gif,.webp' }); const msg = h('div'); let src = 'paste', fname = '', visual = S.thesisVisual || null;
   file.addEventListener('change', async () => { const f = file.files[0]; if (!f) return; msg.replaceChildren(h('div', { class: 'hint', text: 'Reading file ...' }));
-    try { ta.value = await readFileText(f); src = 'upload'; fname = f.name; msg.replaceChildren(h('div', { class: 'hint', text: 'File loaded (' + ta.value.length + ' characters)' })); }
-    catch (e) { msg.replaceChildren(h('div', { class: 'err', text: 'Could not read file (' + e.message + '). Please paste the text instead.' })); } });
+    try {
+      const mediaType = visualFileMediaType(f); const text = await readFileText(f); const id = mediaType ? await storeVisualFile(f, 0) : null;
+      const nextVisual = id ? { id, name: f.name, mediaType, bytes: f.size } : null;
+      if (visual && visual.id !== (nextVisual && nextVisual.id)) await deleteVisualFile(visual.id).catch(() => {});
+      visual = nextVisual; S.thesisVisual = visual; save(); ta.value = text; src = 'upload'; fname = f.name;
+      const status = visual ? (mediaType === 'application/pdf' ? 'PDF visuals ready for AI analysis.' : 'Image ready for AI analysis. Paste the thesis text below.') : 'File loaded (' + text.length + ' characters).';
+      msg.replaceChildren(h('div', { class: 'hint', text: status }));
+    } catch (e) { msg.replaceChildren(h('div', { class: 'err', text: 'Could not read or store file (' + e.message + '). Please paste the text instead.' })); } });
   root.append(h('div', { class: 'wrap' }, h('div', { class: 'box' }, h('h1', { text: 'New chat: Add your thesis' }),
     h('p', { class: 'hint', text: 'This is a new chat. The AI does not know anything from the previous part. Upload your thesis or paste the text you want to reflect on.' }),
+    h('p', { class: 'hint', text: 'PDFs and images are sent with their visual content for AI analysis. This can take longer and increase API usage.' }),
+    visual ? h('div', { class: 'hint', text: 'Visual file ready: ' + visual.name }) : null,
     file, h('div', { style: 'height:8px' }), ta, msg,
     h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'primary', text: 'Continue', onclick: async () => { const t = ta.value.trim(); if (t.length < 200) { msg.replaceChildren(h('div', { class: 'err', text: 'The text is missing or very short.' })); return; }
-      S.thesis = t; log('thesis_loaded', { source: src === 'upload' && t === ta.value.trim() ? 'upload' : 'paste', fileName: fname, chars: t.length, hash: await hashText(t) }); save(); render(); } })))));
+      S.thesis = t; S.thesisVisual = visual; log('thesis_loaded', { source: src === 'upload' && t === ta.value.trim() ? 'upload' : 'paste', fileName: fname, chars: t.length, hash: await hashText(t), visualMediaType: visual ? visual.mediaType : null }); save(); render(); } })))));
 }
 function refreshThesis() {
   const el = ui.thesisEl; if (!el) return; el.replaceChildren(); ui.marks = {};
@@ -284,30 +376,45 @@ function chatColumn(name) {
   const list = h('div', { class: 'body' }); const input = h('textarea', { rows: 2, placeholder: 'Write a message ... (Enter to send, Shift+Enter for a new line)' });
   const send = h('button', { class: 'primary', text: 'Send' });
   ui.chat = { name, list, input, send, busy: false, pending: null };
-  const addMsg = (m) => { const el = h('div', { class: 'msg ' + m.role }, m.attachment ? h('div', {}, h('span', { class: 'att', text: '📎 ' + (m.attachment.name || 'Pasted text') + ' (' + m.attachment.chars + ' characters)' })) : null, m.content); list.append(el); list.scrollTop = list.scrollHeight; return el; };
+  const addMsg = (m) => { const el = h('div', { class: 'msg ' + m.role }, m.attachment ? h('div', {}, h('span', { class: 'att', text: attachmentLabel(m.attachment) })) : null, m.content); list.append(el); list.scrollTop = list.scrollHeight; return el; };
   ui.chat.addMsg = addMsg; S.chats[name].forEach(addMsg);
-  const chip = h('span', { class: 'small' }); const fileIn = h('input', { type: 'file', accept: '.txt,.md,.pdf', style: 'display:none' });
+  const chip = h('span', { class: 'small' }); const fileIn = h('input', { type: 'file', accept: '.txt,.md,.pdf,.png,.jpg,.jpeg,.gif,.webp', style: 'display:none' });
   const attBtn = name === 'baseline' ? h('button', { title: 'Attach a file', text: '📎', onclick: () => fileIn.click() }) : null;
-  fileIn.addEventListener('change', async () => { const f = fileIn.files[0]; fileIn.value = ''; if (!f) return; chip.textContent = 'Reading ' + f.name + ' ...';
-    try { const t = (await readFileText(f)).trim(); ui.chat.pending = { name: f.name, chars: t.length, text: t }; chip.replaceChildren(h('span', { class: 'att', text: '📎 ' + f.name + ' (' + t.length + ' characters)' }), ' ', h('button', { style: 'padding:0 6px;font-size:12px', text: '×', onclick: () => { ui.chat.pending = null; chip.textContent = ''; } })); }
-    catch (e) { chip.textContent = 'Could not read file: ' + e.message; } });
+  fileIn.addEventListener('change', async () => {
+    const f = fileIn.files[0]; fileIn.value = ''; if (!f) return;
+    const previous = ui.chat.pending; ui.chat.pending = null; if (previous && previous.visual) deleteVisualFile(previous.visual.id).catch(() => {});
+    chip.textContent = 'Reading ' + f.name + ' ...';
+    try {
+      const mediaType = visualFileMediaType(f); const existingBytes = S.chats[name].reduce((total, m) => total + (m.attachment && m.attachment.visual ? m.attachment.visual.bytes || 0 : 0), 0);
+      const text = (await readFileText(f)).trim(); const id = mediaType ? await storeVisualFile(f, existingBytes) : null;
+      const attachment = { name: f.name, chars: text.length, text, ...(id ? { visual: { id, name: f.name, mediaType, bytes: f.size } } : {}) };
+      ui.chat.pending = attachment;
+      chip.replaceChildren(h('span', { class: 'att', text: attachmentLabel(attachment) }), ' ', h('button', { style: 'padding:0 6px;font-size:12px', text: '×', onclick: async () => { ui.chat.pending = null; if (attachment.visual) await deleteVisualFile(attachment.visual.id).catch(() => {}); chip.textContent = ''; } }));
+    } catch (e) { chip.textContent = 'Could not read or store file: ' + e.message; }
+  });
   const doSend = () => { const t = input.value.trim(); const att = ui.chat.pending; if ((!t && !att) || ui.chat.busy) return; input.value = ''; ui.chat.pending = null; chip.textContent = ''; sendUserMessage(name, t, 'typed', null, att); };
   send.addEventListener('click', doSend); input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); } });
-  const hint = name === 'baseline' ? h('div', { class: 'hint', style: 'padding:10px 14px;border-bottom:1px solid var(--line)', text: 'Use this chat as you normally would to reflect on your thesis with an AI chat. You can think about the whole thesis or individual parts, ask questions, examine your ideas, or discuss uncertainties. Choose for yourself what to discuss and how. Upload your thesis with 📎 (.pdf, .txt, .md) or paste the relevant text.' }) : null;
+  const hint = name === 'baseline' ? h('div', { class: 'hint', style: 'padding:10px 14px;border-bottom:1px solid var(--line);font-size:14px', text: 'Use this chat as you normally would to reflect on your thesis with an AI chat. You can think about the whole thesis or individual parts, ask questions, examine your ideas, or discuss uncertainties. Choose for yourself what to discuss and how. Upload your thesis with 📎 (.pdf, .txt, .md, .png, .jpg, .jpeg, .gif, .webp) or paste the relevant text. PDFs and images are sent with their visual content for AI analysis. Part 1 may take a little longer when you upload a file.' }) : null;
   return h('section', { class: 'col' }, ...[h('h2', { text: 'Chat' }), hint, list, name === 'baseline' ? h('div', { style: 'padding:0 10px' }, chip, fileIn) : null, h('div', { class: 'composer' }, ...[attBtn, input, send].filter(Boolean))].filter(Boolean));
 }
 function setBusy(b) { ui.chat.busy = b; ui.chat.send.disabled = b; ui.chat.input.disabled = b; }
 function sendUserMessage(name, text, source, questionId, attachment) {
   const msg = { role: 'user', content: text, t: nowIso(), source: source || 'typed', questionId: questionId || null };
   if (attachment) msg.attachment = attachment;
-  S.chats[name].push(msg); log('chat_user', { chars: text.length, source: msg.source, questionId: msg.questionId, attachment: attachment ? { name: attachment.name, chars: attachment.chars } : null }); ui.chat.addMsg(msg); runAssistant(name);
+  S.chats[name].push(msg); log('chat_user', { chars: text.length, source: msg.source, questionId: msg.questionId, attachment: attachment ? { name: attachment.name, chars: attachment.chars, visualMediaType: attachment.visual ? attachment.visual.mediaType : null } : null }); ui.chat.addMsg(msg); runAssistant(name);
 }
 async function runAssistant(name) {
   const chat = ui.chat; setBusy(true); chat.list.querySelectorAll('.err').forEach(e => e.remove());
   const el = h('div', { class: 'msg assistant', text: '…' }); chat.list.append(el); chat.list.scrollTop = chat.list.scrollHeight;
   const t0 = Date.now();
   try {
-    const r = await callClaude({ webSearch: !!(C.WEB_SEARCH && C.WEB_SEARCH[name]), onStatus: (s) => { if (el.dataset.started !== '1') el.textContent = '… ' + s; }, system: systemBlocks(name === 'baseline' ? 'baseline' : 'chat'), messages: S.chats[name].map(m => ({ role: m.role, content: m.attachment ? '<document name="' + m.attachment.name + '">\n' + m.attachment.text + '\n</document>' + (m.content ? '\n\n' + m.content : '') : m.content })), maxTokens: C.MAX_TOKENS_CHAT, onDelta: (t) => { el.dataset.started = '1'; el.textContent = t; chat.list.scrollTop = chat.list.scrollHeight; } });
+    const messages = []; let thesisVisualSent = false;
+    for (const m of S.chats[name]) {
+      let extraVisual = null;
+      if (name === 'prompt' && m.role === 'user' && !thesisVisualSent && S.thesisVisual) { extraVisual = S.thesisVisual; thesisVisualSent = true; }
+      messages.push({ role: m.role, content: await messageContent(m.content, m.attachment, extraVisual) });
+    }
+    const r = await callClaude({ webSearch: !!(C.WEB_SEARCH && C.WEB_SEARCH[name]), onStatus: (s) => { if (el.dataset.started !== '1') el.textContent = '… ' + s; }, system: systemBlocks(name === 'baseline' ? 'baseline' : 'chat'), messages, maxTokens: C.MAX_TOKENS_CHAT, onDelta: (t) => { el.dataset.started = '1'; el.textContent = t; chat.list.scrollTop = chat.list.scrollHeight; } });
     const msg = { role: 'assistant', content: r.text, t: nowIso(), latencyMs: Date.now() - t0, stop: r.stop, webSearches: r.searches }; S.chats[name].push(msg);
     S.usage.push({ t: msg.t, kind: 'chat_' + name, ...r.usage }); log('chat_assistant', { chars: r.text.length, latencyMs: msg.latencyMs, stop: r.stop, webSearches: r.searches });
   } catch (e) {
@@ -329,7 +436,7 @@ function questionsColumn() {
     const userMsg = round === 1 ? 'Please identify relevant passages in my thesis and ask reflection questions about them.' : 'Please identify additional relevant passages that have not been covered yet and ask reflection questions about them. Passages already used:\n' + already;
     log('generate_start', { round });
     try {
-      const r = await callClaude({ system: systemBlocks('generate'), messages: [{ role: 'user', content: userMsg }], maxTokens: C.MAX_TOKENS_GENERATE });
+      const r = await callClaude({ system: systemBlocks('generate'), messages: [{ role: 'user', content: await messageContent(userMsg, null, S.thesisVisual) }], maxTokens: C.MAX_TOKENS_GENERATE });
       S.usage.push({ t: nowIso(), kind: 'generate', ...r.usage }); const items = parseQuestions(r.text); let found = 0;
       for (const it of items) {
         const loc = locate(S.thesis, it.passage); const q = { id: 'q' + (S.questions.length + 1), round, passage: String(it.passage || ''), question: it.question.trim(), type: String(it.type || ''), found: !!loc, start: loc ? loc[0] : null, end: loc ? loc[1] : null, overlap: false, status: 'open', reason: '', reasonText: '', createdAt: nowIso() };
@@ -406,14 +513,15 @@ function renderBreak(root, after) {
   root.append(h('div', { class: 'wrap' }, h('div', { class: 'box' }, h('h1', { text: 'Part ' + n + ' complete' }),
     h('p', { text: nextStepHint }),
     url ? h('p', {}, h('a', { href: url, target: '_blank', rel: 'noopener', text: 'Open questionnaire' })) : h('div', { class: 'warn', text: 'No questionnaire link configured in config.js (QUESTIONNAIRE.after_' + after + ').' }),
-    h('div', { class: 'row' }, h('button', { text: 'Save log (interim)', onclick: () => doExport('part' + n) }), h('button', { class: 'primary', text: 'Continue', onclick: () => { log('break_continue', { after }); S.stepIdx++; enterStep(); save(); render(); if (curStep().kind === 'end' && !S.finalExported) { S.finalExported = true; doExport('final'); } } })))));
+    h('div', { class: 'row' }, h('button', { text: 'Back', onclick: goBack }), h('button', { class: 'primary', text: 'Continue', onclick: () => { log('break_continue', { after }); S.stepIdx++; enterStep(); save(); render(); if (curStep().kind === 'end' && !S.finalExported) { S.finalExported = true; doExport('final'); } } })))));
 }
 function renderEnd(root) {
   root.append(h('div', { class: 'wrap' }, h('div', { class: 'box' }, h('h1', { text: 'Complete - thank you!' }),
+    h('p', { text: 'A short interview with the researcher will follow now.' }),
     h('p', { text: 'The log was automatically downloaded as a JSON file to your Downloads folder.' }),
     h('p', { class: 'hint', text: 'Researcher: check the file, then delete all local data. If the download did not appear, download it again here.' }),
-    h('div', { class: 'row' }, h('button', { text: 'Download log again', onclick: () => doExport('final') }),
-      h('button', { text: 'Delete all local data on this device', onclick: () => { if (confirm('Delete everything? Any data not exported will be lost.')) { localStorage.removeItem(LS_KEY); S = null; API_KEY = ''; render(); } } })))));
+    h('div', { class: 'row' }, h('button', { text: 'Back', onclick: goBack }), h('button', { text: 'Download log again', onclick: () => doExport('final') }),
+      h('button', { text: 'Delete all local data on this device', onclick: async () => { if (confirm('Delete everything? Any data not exported will be lost.')) { localStorage.removeItem(LS_KEY); await clearVisualFiles().catch(() => {}); S = null; API_KEY = ''; render(); } } })))));
 }
 
 render();

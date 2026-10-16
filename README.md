@@ -14,10 +14,10 @@
 ## What is recorded
 Chat interactions from Parts 1 and 2; generated questions and their passages; question statuses, dismissal reasons, and notes; changes made during the pair discussion; timestamps; model and prompt version; and token usage. The API key is never recorded.
 
-Thesis text is included in the exported log only when the option is selected during setup. Otherwise, uploaded attachments include only the filename and character count; the text is omitted.
+Thesis text is included in the exported log only when the option is selected during setup. Otherwise, uploaded attachments include only the filename, character count, and visual media type; the text is omitted. Original PDF and image bytes are never included in the export.
 
 ## Security
-The API key is held in memory only and is never stored in the log. It is cleared when the tab is closed or reloaded. After a reload, a session can be resumed by entering the key again; session state is stored in `localStorage`.
+The API key is held in memory only and is never stored in the log. It is cleared when the tab is closed or reloaded. After a reload, a session can be resumed by entering the key again; session state is stored in `localStorage`. Original visual files are stored in browser `IndexedDB` so they can be sent again when resuming; "Delete all local data on this device" clears both stores.
 
 ## PDF uploads
-An internet connection is required to load pdf.js from cdnjs.
+An internet connection is required to load pdf.js from cdnjs. PDFs are sent to Claude with their visual pages as well as their extracted text. JPEG, PNG, GIF, and WebP images can also be uploaded. Visual files are sent to Anthropic for analysis and increase API usage; the total visual file size is limited to 18 MB per chat.
