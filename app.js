@@ -505,14 +505,15 @@ function renderPair(root) {
 // ---------- Break / end ----------
 function renderBreak(root, after) {
   const url = C.QUESTIONNAIRE && C.QUESTIONNAIRE['after_' + after]; const n = partNumber(after);
+  const hasQuestionnaire = after !== 'pair' && url;
   const nextStepHint = after === 'pair'
-    ? 'Please complete the questionnaire for this part first. Then return here and click "Continue" to finish the study.'
+    ? 'Continue to finish the study.'
     : after === 'prompt'
       ? 'Please complete the questionnaire for this part first, then contact me. After that, click "Continue" to begin Part 3.'
     : 'Please complete the questionnaire for this part first. Then return here and click "Continue" to begin the next part.';
   root.append(h('div', { class: 'wrap' }, h('div', { class: 'box' }, h('h1', { text: 'Part ' + n + ' complete' }),
     h('p', { text: nextStepHint }),
-    url ? h('p', {}, h('a', { href: url, target: '_blank', rel: 'noopener', text: 'Open questionnaire' })) : h('div', { class: 'warn', text: 'No questionnaire link configured in config.js (QUESTIONNAIRE.after_' + after + ').' }),
+    hasQuestionnaire ? h('p', {}, h('a', { href: url, target: '_blank', rel: 'noopener', text: 'Open questionnaire' })) : after === 'pair' ? null : h('div', { class: 'warn', text: 'No questionnaire link configured in config.js (QUESTIONNAIRE.after_' + after + ').' }),
     h('div', { class: 'row' }, h('button', { text: 'Back', onclick: goBack }), h('button', { class: 'primary', text: 'Continue', onclick: () => { log('break_continue', { after }); S.stepIdx++; enterStep(); save(); render(); if (curStep().kind === 'end' && !S.finalExported) { S.finalExported = true; doExport('final'); } } })))));
 }
 function renderEnd(root) {
