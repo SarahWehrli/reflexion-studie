@@ -2,7 +2,7 @@
 'use strict';
 const C = window.CONFIG;
 const LS_KEY = 'reflexions-studie-session-v1';
-const API_URL = 'https://api.anthropic.com/v1/messages';
+const API_URL = 'https://api.mammouth.ai/v1/chat/completions';
 const VISUAL_DB_NAME = 'reflexion-study-visual-files';
 const MAX_VISUAL_BYTES = 18 * 1024 * 1024;
 const STATUS = { open:'Open', later:'For later', discussed:'Discussed', dismissed:'Dismissed' };
@@ -101,7 +101,7 @@ async function messageContent(text, attachment, extraVisual) {
   return blocks.length === 1 && blocks[0].type === 'text' ? blocks[0].text : blocks;
 }
 function attachmentLabel(attachment) {
-  const detail = attachment.visual ? attachment.visual.mediaType === 'application/pdf' ? 'PDF visuals + ' + attachment.chars + ' characters' : 'image' : attachment.chars + ' characters';
+  const detail = attachment.visual ? attachment.visual.mediaType === 'application/pdf' ? 'PDF text + ' + attachment.chars + ' characters' : 'image' : attachment.chars + ' characters';
   return '📎 ' + attachment.name + ' (' + detail + ')';
 }
 
@@ -111,43 +111,119 @@ function apiError(status, msg) {
   const e = new Error((map[status] || ('API error ' + status)) + (msg ? ' (' + msg + ')' : ''));
   e.status = status; return e;
 }
-async function callClaude({ system, messages, maxTokens, onDelta, onStatus, webSearch }) {
-  if (!API_KEY) throw new Error('No API key in memory. Reload the page and enter the key.');
-  let res;
-  try {
-    res = await fetch(API_URL, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify(Object.assign({ model: C.MODEL, max_tokens: maxTokens, messages, stream: true },
-        system ? { system } : {}, C.EFFORT ? { output_config: { effort: C.EFFORT } } : {}, C.THINKING ? { thinking: { type: C.THINKING } } : {},
-        webSearch && C.WEB_SEARCH ? { tools: [{ type: C.WEB_SEARCH.type, name: 'web_search', max_uses: C.WEB_SEARCH.max_uses }] } : {}))
-    });
-  } catch (e) { throw new Error('Network error or blocked by the browser (CORS). See the "Local server" section in README.'); }
-  if (!res.ok) { let m = ''; try { const j = await res.json(); m = (j.error && j.error.message) || ''; } catch (e) { /* ignorieren */ } throw apiError(res.status, m); }
-  const reader = res.body.getReader(); const dec = new TextDecoder();
-  let buf = '', text = '', stop = null; const usage = { input: 0, output: 0, cache_read: 0, cache_write: 0, web_searches: 0 }; const blocks = {}; const searches = [];
-  for (;;) {
-    const { done, value } = await reader.read(); if (done) break;
-    buf += dec.decode(value, { stream: true }).replace(/\r\n/g, '\n');
-    let idx;
-    while ((idx = buf.indexOf('\n\n')) >= 0) {
-      const raw = buf.slice(0, idx); buf = buf.slice(idx + 2);
-      const line = raw.split('\n').find(l => l.startsWith('data:')); if (!line) continue;
-      let ev; try { ev = JSON.parse(line.slice(5).trim()); } catch (e) { continue; }
-      if (ev.type === 'message_start' && ev.message && ev.message.usage) { const u = ev.message.usage; usage.input = u.input_tokens || 0; usage.cache_read = u.cache_read_input_tokens || 0; usage.cache_write = u.cache_creation_input_tokens || 0; }
-      else if (ev.type === 'content_block_start' && ev.content_block) { const b = ev.content_block; blocks[ev.index] = { type: b.type, json: '' };
-        if (b.type === 'thinking' || b.type === 'redacted_thinking') { if (onStatus && !text) onStatus('thinking ...'); }
-        else if (b.type === 'server_tool_use') { if (onStatus) onStatus('searching the web ...'); }
-        else if (b.type === 'text' && text && !/\n$/.test(text)) { text += '\n\n'; } }
-      else if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta') { text += ev.delta.text; if (onDelta) onDelta(text); }
-      else if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'input_json_delta' && blocks[ev.index]) { blocks[ev.index].json += ev.delta.partial_json || ''; }
-      else if (ev.type === 'content_block_stop' && blocks[ev.index] && blocks[ev.index].type === 'server_tool_use') { try { const q = JSON.parse(blocks[ev.index].json || '{}').query; if (q) searches.push(q); } catch (e) { /* ignorieren */ } }
-      else if (ev.type === 'message_delta') { if (ev.usage) { usage.output = ev.usage.output_tokens || usage.output; if (ev.usage.server_tool_use) usage.web_searches = ev.usage.server_tool_use.web_search_requests || 0; } if (ev.delta && ev.delta.stop_reason) stop = ev.delta.stop_reason; }
-      else if (ev.type === 'error') { throw new Error('API stream error: ' + ((ev.error && ev.error.message) || 'unknown')); }
+function mammouthContent(content) {
+  if (typeof content === 'string') return content;
+  const parts = (Array.isArray(content) ? content : []).flatMap(block => {
+    if (block.type === 'text') return [block.text];
+    if (block.type === 'image' && block.source && block.source.type === 'base64' && block.source.media_type.startsWith('image/')) {
+      return [{ type: 'image_url', image_url: { url: 'data:' + block.source.media_type + ';base64,' + block.source.data } }];
     }
+    return [];
+  });
+  if (parts.every(part => typeof part === 'string')) return parts.join('\n');
+  return parts;
+}
+function reconstructAbstract(index) {
+  if (!index) return '';
+  const words = [];
+  for (const [word, positions] of Object.entries(index)) for (const position of positions) words[position] = word;
+  return words.filter(Boolean).join(' ');
+}
+async function searchOpenAlex(query, limit) {
+  const url = new URL('https://api.openalex.org/works');
+  url.searchParams.set('search', String(query).trim().slice(0, 300));
+  url.searchParams.set('per-page', String(Math.max(1, Math.min(Number(limit) || 5, 5))));
+  url.searchParams.set('select', 'id,doi,title,publication_year,authorships,primary_location,abstract_inverted_index');
+  let response;
+  try { response = await fetch(url); } catch (e) { throw new Error('OpenAlex search failed (network or CORS error).'); }
+  if (!response.ok) throw new Error('OpenAlex search failed with HTTP ' + response.status + '.');
+  const data = await response.json();
+  const works = (data.results || []).map(work => ({
+    title: work.title || 'Untitled',
+    year: work.publication_year || null,
+    authors: (work.authorships || []).map(item => item.author && item.author.display_name).filter(Boolean).slice(0, 4),
+    venue: work.primary_location && work.primary_location.source ? work.primary_location.source.display_name : null,
+    doi: work.doi || null,
+    url: work.doi || (work.primary_location && work.primary_location.landing_page_url) || work.id,
+    abstract: reconstructAbstract(work.abstract_inverted_index).slice(0, 3000),
+    abstractAvailable: !!work.abstract_inverted_index
+  }));
+  return { query, works };
+}
+async function callMammouth({ system, messages, maxTokens, onDelta, onStatus, webSearch }) {
+  if (!API_KEY) throw new Error('No API key in memory. Reload the page and enter the key.');
+  const requestMessages = (system ? [{ role: 'system', content: mammouthContent(system) }] : [])
+    .concat(messages.map(message => ({ role: message.role, content: mammouthContent(message.content) })));
+  const tools = webSearch ? [{ type: 'function', function: {
+    name: 'search_openalex',
+    description: 'Search OpenAlex for published academic works. Use this for comparable studies and evidence relevant to the student\'s research decisions.',
+    parameters: { type: 'object', properties: { query: { type: 'string', description: 'Focused academic search phrase' }, limit: { type: 'integer', minimum: 1, maximum: 5 } }, required: ['query'], additionalProperties: false }
+  } }] : [];
+  const searches = []; const usage = { input: 0, output: 0, cache_read: 0, cache_write: 0, web_searches: 0 };
+  let text = '', stop = null, toolCallCount = 0;
+  for (;;) {
+    let res;
+    try {
+      res = await fetch(API_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + API_KEY },
+        body: JSON.stringify({ model: C.MODEL, max_tokens: maxTokens, messages: requestMessages, stream: true, stream_options: { include_usage: true }, ...(webSearch ? { tools, tool_choice: 'auto' } : {}) })
+      });
+    } catch (e) { throw new Error('Network error or blocked by the browser (CORS). See the "Local server" section in README.'); }
+    if (!res.ok) { let m = ''; try { const j = await res.json(); m = (j.error && j.error.message) || ''; } catch (e) { /* ignorieren */ } throw apiError(res.status, m); }
+    const reader = res.body.getReader(); const dec = new TextDecoder();
+    let buf = '', roundText = '', roundStop = null; const pendingCalls = {};
+    const readEvent = raw => {
+      for (const line of raw.split('\n')) {
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim(); if (!data || data === '[DONE]') continue;
+        let event; try { event = JSON.parse(data); } catch (e) { continue; }
+        if (event.error) throw new Error('API stream error: ' + (event.error.message || 'unknown'));
+        if (event.usage) { usage.input += event.usage.prompt_tokens || 0; usage.output += event.usage.completion_tokens || 0; }
+        const choice = event.choices && event.choices[0]; if (!choice) continue;
+        const delta = choice.delta || {};
+        if (typeof delta.content === 'string') roundText += delta.content;
+        else if (Array.isArray(delta.content)) for (const part of delta.content) if (part.type === 'text') roundText += part.text || '';
+        for (const call of delta.tool_calls || []) {
+          const item = pendingCalls[call.index] || (pendingCalls[call.index] = { id: '', type: 'function', function: { name: '', arguments: '' } });
+          if (call.id) item.id = call.id;
+          if (call.function && call.function.name) item.function.name += call.function.name;
+          if (call.function && call.function.arguments) item.function.arguments += call.function.arguments;
+        }
+        if (choice.finish_reason) roundStop = choice.finish_reason;
+      }
+    };
+    for (;;) {
+      const { done, value } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const raw = buf.slice(0, idx); buf = buf.slice(idx + 2); readEvent(raw);
+      }
+    }
+    if (buf.trim()) readEvent(buf);
+    const calls = Object.keys(pendingCalls).sort((a, b) => Number(a) - Number(b)).map(index => pendingCalls[index]);
+    stop = roundStop;
+    if (!calls.length) { text = roundText; if (onDelta) onDelta(text); break; }
+    if (!webSearch) throw new Error('The model requested an unavailable tool.');
+    toolCallCount += calls.length;
+    if (toolCallCount > 4) throw new Error('OpenAlex search limit reached for this response. Please ask a narrower question.');
+    requestMessages.push({ role: 'assistant', content: roundText || null, tool_calls: calls });
+    for (const call of calls) {
+      if (!call.id || call.function.name !== 'search_openalex') throw new Error('The model requested an unsupported tool.');
+      let args;
+      try { args = JSON.parse(call.function.arguments || '{}'); } catch (e) { throw new Error('The model returned invalid OpenAlex search arguments.'); }
+      if (typeof args.query !== 'string' || !args.query.trim()) throw new Error('OpenAlex search requires a non-empty query.');
+      if (onStatus) onStatus('searching OpenAlex ...');
+      const result = await searchOpenAlex(args.query, args.limit);
+      searches.push({ query: result.query, works: result.works.map(({ abstract, ...work }) => work) });
+      usage.web_searches++;
+      requestMessages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ...result, note: 'OpenAlex metadata and indexed abstracts only; the full papers were not retrieved or read.' }) });
+    }
+    if (onStatus) onStatus('reading sources ...');
   }
   text = text.replace(/^\n+/, '');
-  if (!text.trim()) throw new Error(stop === 'max_tokens' ? 'Empty response: thinking used the token limit. Increase MAX_TOKENS or lower EFFORT in config.js.' : 'Empty response from the API (' + (stop || 'unknown') + ').');
+  if (!text.trim()) throw new Error(stop === 'length' ? 'Empty response: the token limit was reached. Increase MAX_TOKENS in config.js.' : 'Empty response from the API (' + (stop || 'unknown') + ').');
   return { text, usage, stop, searches };
 }
 function systemBlocks(kind) {
@@ -192,6 +268,7 @@ async function buildExport() {
     if (name !== 'pair') {
       S.chats[name].forEach(m => interactions.push({
         at: m.t, type: 'chat_message', role: m.role, content: m.content,
+        ...(m.webSearches && m.webSearches.length ? { webSearches: m.webSearches } : {}),
         ...(m.source ? { source: m.source } : {}),
         ...(m.questionId ? { questionId: m.questionId } : {}),
         ...(m.attachment ? { attachment: { name: m.attachment.name, chars: m.attachment.chars, visualMediaType: m.attachment.visual ? m.attachment.visual.mediaType : null, text: S.includeThesis ? m.attachment.text : null } } : {})
@@ -247,12 +324,12 @@ function renderSetup(root) {
   let saved = null; try { saved = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch (e) { saved = null; }
   const placeholder = /PLACEHOLDER/.test(C.PROMPT_TEXT);
   const f = { id: h('input', { value: q.get('id') || '', placeholder: 'e.g. P03' }), pair: h('input', { value: q.get('pair') || '', placeholder: 'e.g. Pair2' }),
-    key: h('input', { type: 'password', placeholder: 'sk-ant-...', autocomplete: 'off' }),
+    key: h('input', { type: 'password', placeholder: 'Mammouth API key', autocomplete: 'off' }),
     incl: h('input', { type: 'checkbox', style: 'width:auto' }) };
   const msg = h('div'); const info = (t, cls) => { msg.replaceChildren(h('div', { class: cls || 'hint', text: t })); };
   const testBtn = h('button', { text: 'Test key and connection', onclick: async () => {
     API_KEY = f.key.value.trim(); if (!API_KEY) return info('Enter the API key first.', 'err');
-    info('Testing ...'); try { const ws = !!(C.WEB_SEARCH && (C.WEB_SEARCH.prompt || C.WEB_SEARCH.baseline)); await callClaude({ system: 'Reply only with the word ok. Do not use tools.', messages: [{ role: 'user', content: 'Test' }], maxTokens: 2000, webSearch: ws }); info('Connection successful (model, effort' + (ws ? ', web search tool' : '') + ' accepted).', 'hint'); } catch (e) { info(e.message, 'err'); }
+    info('Testing ...'); try { await callMammouth({ system: 'Reply only with the word ok.', messages: [{ role: 'user', content: 'Test' }], maxTokens: 2000 }); info('Connection successful (Mammouth API and model).', 'hint'); } catch (e) { info(e.message, 'err'); }
   } });
   const start = h('button', { class: 'primary', text: 'Start session', onclick: async () => {
     API_KEY = f.key.value.trim(); const id = f.id.value.trim();
@@ -352,7 +429,7 @@ function renderThesisLoad(root) {
     } catch (e) { msg.replaceChildren(h('div', { class: 'err', text: 'Could not read or store file (' + e.message + '). Please paste the text instead.' })); } });
   root.append(h('div', { class: 'wrap' }, h('div', { class: 'box' }, h('h1', { text: 'New chat: Add your thesis' }),
     h('p', { class: 'hint', text: 'This is a new chat. The AI does not know anything from the previous part. Upload your thesis or paste the text you want to reflect on.' }),
-    h('p', { class: 'hint', text: 'PDFs and images are sent with their visual content for AI analysis. This can take longer and increase API usage.' }),
+    h('p', { class: 'hint', text: 'PDF text is extracted in the browser. Images are sent for visual analysis when supported by the selected model.' }),
     visual ? h('div', { class: 'hint', text: 'Visual file ready: ' + visual.name }) : null,
     file, h('div', { style: 'height:8px' }), ta, msg,
     h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'primary', text: 'Continue', onclick: async () => { const t = ta.value.trim(); if (t.length < 200) { msg.replaceChildren(h('div', { class: 'err', text: 'The text is missing or very short.' })); return; }
@@ -394,7 +471,7 @@ function chatColumn(name) {
   });
   const doSend = () => { const t = input.value.trim(); const att = ui.chat.pending; if ((!t && !att) || ui.chat.busy) return; input.value = ''; ui.chat.pending = null; chip.textContent = ''; sendUserMessage(name, t, 'typed', null, att); };
   send.addEventListener('click', doSend); input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); } });
-  const hint = name === 'baseline' ? h('div', { class: 'hint', style: 'padding:10px 14px;border-bottom:1px solid var(--line);font-size:14px', text: 'Use this chat as you normally would to reflect on your thesis with an AI chat. You can think about the whole thesis or individual parts, ask questions, examine your ideas, or discuss uncertainties. Choose for yourself what to discuss and how. Upload your thesis with 📎 (.pdf, .txt, .md, .png, .jpg, .jpeg, .gif, .webp) or paste the relevant text. PDFs and images are sent with their visual content for AI analysis. Part 1 may take a little longer when you upload a file.' }) : null;
+  const hint = name === 'baseline' ? h('div', { class: 'hint', style: 'padding:10px 14px;border-bottom:1px solid var(--line);font-size:14px', text: 'Use this chat as you normally would to reflect on your thesis with an AI chat. You can think about the whole thesis or individual parts, ask questions, examine your ideas, or discuss uncertainties. Choose for yourself what to discuss and how. Upload your thesis with 📎 (.pdf, .txt, .md, .png, .jpg, .jpeg, .gif, .webp) or paste the relevant text. PDF text is extracted in the browser; supported image files are sent for visual analysis.' }) : null;
   return h('section', { class: 'col' }, ...[h('h2', { text: 'Chat' }), hint, list, name === 'baseline' ? h('div', { style: 'padding:0 10px' }, chip, fileIn) : null, h('div', { class: 'composer' }, ...[attBtn, input, send].filter(Boolean))].filter(Boolean));
 }
 function setBusy(b) { ui.chat.busy = b; ui.chat.send.disabled = b; ui.chat.input.disabled = b; }
@@ -414,7 +491,7 @@ async function runAssistant(name) {
       if (name === 'prompt' && m.role === 'user' && !thesisVisualSent && S.thesisVisual) { extraVisual = S.thesisVisual; thesisVisualSent = true; }
       messages.push({ role: m.role, content: await messageContent(m.content, m.attachment, extraVisual) });
     }
-    const r = await callClaude({ webSearch: !!(C.WEB_SEARCH && C.WEB_SEARCH[name]), onStatus: (s) => { if (el.dataset.started !== '1') el.textContent = '… ' + s; }, system: systemBlocks(name === 'baseline' ? 'baseline' : 'chat'), messages, maxTokens: C.MAX_TOKENS_CHAT, onDelta: (t) => { el.dataset.started = '1'; el.textContent = t; chat.list.scrollTop = chat.list.scrollHeight; } });
+    const r = await callMammouth({ system: systemBlocks(name === 'baseline' ? 'baseline' : 'chat'), messages, maxTokens: C.MAX_TOKENS_CHAT, webSearch: name === 'prompt' && !!(C.WEB_SEARCH && C.WEB_SEARCH.prompt), onStatus: (s) => { if (el.dataset.started !== '1') el.textContent = '… ' + s; }, onDelta: (t) => { el.dataset.started = '1'; el.textContent = t; chat.list.scrollTop = chat.list.scrollHeight; } });
     const msg = { role: 'assistant', content: r.text, t: nowIso(), latencyMs: Date.now() - t0, stop: r.stop, webSearches: r.searches }; S.chats[name].push(msg);
     S.usage.push({ t: msg.t, kind: 'chat_' + name, ...r.usage }); log('chat_assistant', { chars: r.text.length, latencyMs: msg.latencyMs, stop: r.stop, webSearches: r.searches });
   } catch (e) {
@@ -436,7 +513,7 @@ function questionsColumn() {
     const userMsg = round === 1 ? 'Please identify relevant passages in my thesis and ask reflection questions about them.' : 'Please identify additional relevant passages that have not been covered yet and ask reflection questions about them. Passages already used:\n' + already;
     log('generate_start', { round });
     try {
-      const r = await callClaude({ system: systemBlocks('generate'), messages: [{ role: 'user', content: await messageContent(userMsg, null, S.thesisVisual) }], maxTokens: C.MAX_TOKENS_GENERATE });
+      const r = await callMammouth({ system: systemBlocks('generate'), messages: [{ role: 'user', content: await messageContent(userMsg, null, S.thesisVisual) }], maxTokens: C.MAX_TOKENS_GENERATE });
       S.usage.push({ t: nowIso(), kind: 'generate', ...r.usage }); const items = parseQuestions(r.text); let found = 0;
       for (const it of items) {
         const loc = locate(S.thesis, it.passage); const q = { id: 'q' + (S.questions.length + 1), round, passage: String(it.passage || ''), question: it.question.trim(), type: String(it.type || ''), found: !!loc, start: loc ? loc[0] : null, end: loc ? loc[1] : null, overlap: false, status: 'open', reason: '', reasonText: '', createdAt: nowIso() };

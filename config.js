@@ -1,8 +1,8 @@
 // ===== Study settings - edit here, not in app.js =====
 window.CONFIG = {
-  MODEL: "claude-sonnet-5-5",   // Model ID (recorded in the log)
+  MODEL: "deepseek-v4.1-flash", // Mammouth model ID (recorded in the log)
   PHASE_MINUTES: 15,            // Suggested time per chat part (soft timer; does not end the part)
-  PROMPT_VERSION: "v1",         // Increment this whenever the prompt changes
+  PROMPT_VERSION: "v2-openalex", // Increment this whenever the prompt changes
   EFFORT: "medium",             // low | medium | high - applies to both parts
   THINKING: null,               // null = default adaptive thinking. "between_tools" = no upfront thinking (faster)
   // max_tokens includes thinking and response tokens. Too low can result in an empty response.
@@ -11,10 +11,8 @@ window.CONFIG = {
 
   // Web search
   WEB_SEARCH: {
-    prompt: true,               // Part 2: the prompt uses web search for comparable studies
-    baseline: true,             // Part 1: set to true if participants should also have web search
-    type: "web_search_20250305",
-    max_uses: 5
+    prompt: true,               // OpenAlex search is available in Part 2 for comparable academic studies
+    baseline: false             // Part 1 remains an unassisted baseline
   },
 
   // Questionnaire links (one per part). Leave empty to show no button.
@@ -55,8 +53,8 @@ Ask only about the relevance of the research problem itself if the student is st
 **Focus 2: Consider Alternatives**
 When a central decision (method, sample, system design, analysis) seems to have had only one option, or follows "what is usually done":
 - Ask what else would have been possible.
-- Use web search to find two published studies that made a comparable decision: one following the common approach and one that handled it differently. Comparable decision matters more than the same topic.
-- For each give authors, year, title, venue, link or DOI, and one or two sentences on what they did. Describe only what the source says; say if you only saw the abstract. If you find nothing suitable, say so.
+- Use the app's OpenAlex search function to find two published studies that made a comparable decision: one following the common approach and one that handled it differently. Comparable decision matters more than the same topic.
+- For each give authors, year, title, venue, DOI or OpenAlex link, and one or two sentences on what they did. OpenAlex metadata and abstracts are not full-text access: say when you only saw the abstract, and do not infer findings from metadata alone. If no suitable study is found, say so.
 - Ask one comparison question: "What is similar and what is different in your situation? What does that mean for your decision?"
 Never recommend either approach.
 
