@@ -48,8 +48,9 @@ async function hashText(t) {
   try { if (window.crypto && crypto.subtle) { const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t)); return 'sha256:' + Array.from(new Uint8Array(b)).map(x => x.toString(16).padStart(2, '0')).join(''); } } catch (e) { /* Fallback */ }
   return 'cyrb53:' + cyrb53(t);
 }
+function isPdfFile(file) { return file.type === 'application/pdf' || /\.pdf$/i.test(file.name); }
 function visualFileMediaType(file) {
-  if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) return 'application/pdf';
+  if (isPdfFile(file)) return null;
   const byExtension = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' };
   const ext = file.name.split('.').pop().toLowerCase();
   return byExtension[ext] || (Object.values(byExtension).includes(file.type) ? file.type : null);
@@ -76,7 +77,7 @@ function visualDbRequest(mode, method, key, value) {
   }));
 }
 async function storeVisualFile(file, existingBytes) {
-  if (file.size + (existingBytes || 0) > MAX_VISUAL_BYTES) throw new Error('Visual files must total no more than 18 MB per chat. Please compress the file or use text only.');
+  if (file.size + (existingBytes || 0) > MAX_VISUAL_BYTES) throw new Error('Images must total no more than 18 MB per chat. Please compress the image or use text only.');
   const id = 'visual-' + Date.now() + '-' + Math.random().toString(36).slice(2);
   await visualDbRequest('readwrite', 'put', id, file);
   return id;
@@ -90,10 +91,11 @@ async function visualBlock(ref) {
     const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',').pop());
     reader.onerror = () => reject(reader.error || new Error('Could not read the visual file.')); reader.readAsDataURL(file);
   });
-  return { type: ref.mediaType === 'application/pdf' ? 'document' : 'image', source: { type: 'base64', media_type: ref.mediaType, data: dataUrl } };
+  return { type: 'image', source: { type: 'base64', media_type: ref.mediaType, data: dataUrl } };
 }
+function isImageRef(ref) { return !!(ref && ref.mediaType && ref.mediaType.startsWith('image/')); }
 async function messageContent(text, attachment, extraVisual) {
-  const blocks = []; const visual = (attachment && attachment.visual) || extraVisual;
+  const blocks = []; const visual = [attachment && attachment.visual, extraVisual].find(isImageRef);
   if (visual) blocks.push(await visualBlock(visual));
   if (attachment && attachment.text) blocks.push({ type: 'text', text: '<document name="' + attachment.name + '">\n' + attachment.text + '\n</document>' });
   if (text) blocks.push({ type: 'text', text });
@@ -101,7 +103,7 @@ async function messageContent(text, attachment, extraVisual) {
   return blocks.length === 1 && blocks[0].type === 'text' ? blocks[0].text : blocks;
 }
 function attachmentLabel(attachment) {
-  const detail = attachment.visual ? attachment.visual.mediaType === 'application/pdf' ? 'PDF text + ' + attachment.chars + ' characters' : 'image' : attachment.chars + ' characters';
+  const detail = isImageRef(attachment.visual) ? 'image' : attachment.pdf ? 'PDF text extracted, ' + attachment.chars + ' characters' : attachment.chars + ' characters';
   return '📎 ' + attachment.name + ' (' + detail + ')';
 }
 
@@ -182,8 +184,10 @@ async function callMammouth({ system, messages, maxTokens, onDelta, onStatus, we
         if (event.usage) { usage.input += event.usage.prompt_tokens || 0; usage.output += event.usage.completion_tokens || 0; }
         const choice = event.choices && event.choices[0]; if (!choice) continue;
         const delta = choice.delta || {};
+        const before = roundText.length;
         if (typeof delta.content === 'string') roundText += delta.content;
         else if (Array.isArray(delta.content)) for (const part of delta.content) if (part.type === 'text') roundText += part.text || '';
+        if (onDelta && roundText.length > before && roundText.trim()) onDelta(roundText.replace(/^\n+/, ''));
         for (const call of delta.tool_calls || []) {
           const item = pendingCalls[call.index] || (pendingCalls[call.index] = { id: '', type: 'function', function: { name: '', arguments: '' } });
           if (call.id) item.id = call.id;
@@ -204,7 +208,7 @@ async function callMammouth({ system, messages, maxTokens, onDelta, onStatus, we
     if (buf.trim()) readEvent(buf);
     const calls = Object.keys(pendingCalls).sort((a, b) => Number(a) - Number(b)).map(index => pendingCalls[index]);
     stop = roundStop;
-    if (!calls.length) { text = roundText; if (onDelta) onDelta(text); break; }
+    if (!calls.length) { text = roundText; break; }
     if (!webSearch) throw new Error('The model requested an unavailable tool.');
     toolCallCount += calls.length;
     if (toolCallCount > 4) throw new Error('OpenAlex search limit reached for this response. Please ask a narrower question.');
@@ -347,7 +351,7 @@ function renderSetup(root) {
     resume,
     h('label', {}, 'Participant ID'), f.id, h('label', {}, 'Pair ID (optional)'), f.pair,
     h('label', {}, 'API key ', h('span', { class: 'hint', text: '(kept in memory only; never stored or logged)' })), f.key,
-    h('label', { style: 'font-weight:400;display:flex;gap:8px;align-items:center' }, f.incl, 'Include uploaded/pasted thesis text in the exported log (otherwise only the filename, length, and hash are saved)'),
+    h('label', { style: 'font-weight:400;display:flex;gap:8px;align-items:center' }, f.incl, 'Include uploaded/pasted thesis text in the exported log (otherwise only the filename and length are saved)'),
     h('div', { class: 'row', style: 'margin-top:14px' }, testBtn, start), msg)));
 }
 function buildSteps(order) {
@@ -381,7 +385,8 @@ function goBack() {
   S.stepIdx--; enterStep(); save(); render();
 }
 function loadScript(src) { return new Promise((res, rej) => { const s = h('script', { src }); s.onload = res; s.onerror = () => rej(new Error('Could not load script')); document.head.append(s); }); }
-async function readFileText(file) { return visualFileMediaType(file) === 'application/pdf' ? loadPdfText(file) : visualFileMediaType(file) ? '' : file.text(); }
+async function readFileText(file) { return isPdfFile(file) ? loadPdfText(file) : visualFileMediaType(file) ? '' : file.text(); }
+function pdfStatus(chars) { return 'PDF text extracted (' + chars + ' characters). Figures and layout are not included.'; }
 async function loadPdfText(file) {
   const base = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
   if (!window.pdfjsLib) await loadScript(base + 'pdf.min.js');
@@ -424,13 +429,13 @@ function renderThesisLoad(root) {
       const nextVisual = id ? { id, name: f.name, mediaType, bytes: f.size } : null;
       if (visual && visual.id !== (nextVisual && nextVisual.id)) await deleteVisualFile(visual.id).catch(() => {});
       visual = nextVisual; S.thesisVisual = visual; save(); ta.value = text; src = 'upload'; fname = f.name;
-      const status = visual ? (mediaType === 'application/pdf' ? 'PDF visuals ready for AI analysis.' : 'Image ready for AI analysis. Paste the thesis text below.') : 'File loaded (' + text.length + ' characters).';
+      const status = visual ? 'Image ready for AI analysis. Paste the thesis text below.' : isPdfFile(f) ? pdfStatus(text.length) : 'File loaded (' + text.length + ' characters).';
       msg.replaceChildren(h('div', { class: 'hint', text: status }));
     } catch (e) { msg.replaceChildren(h('div', { class: 'err', text: 'Could not read or store file (' + e.message + '). Please paste the text instead.' })); } });
   root.append(h('div', { class: 'wrap' }, h('div', { class: 'box' }, h('h1', { text: 'New chat: Add your thesis' }),
     h('p', { class: 'hint', text: 'This is a new chat. The AI does not know anything from the previous part. Upload your thesis or paste the text you want to reflect on.' }),
-    h('p', { class: 'hint', text: 'PDF text is extracted in the browser. Images are sent for visual analysis when supported by the selected model.' }),
-    visual ? h('div', { class: 'hint', text: 'Visual file ready: ' + visual.name }) : null,
+    h('p', { class: 'hint', text: 'Only the text of a PDF is extracted in the browser; figures and layout are not included. Images are sent for visual analysis when supported by the selected model.' }),
+    isImageRef(visual) ? h('div', { class: 'hint', text: 'Visual file ready: ' + visual.name }) : null,
     file, h('div', { style: 'height:8px' }), ta, msg,
     h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'primary', text: 'Continue', onclick: async () => { const t = ta.value.trim(); if (t.length < 200) { msg.replaceChildren(h('div', { class: 'err', text: 'The text is missing or very short.' })); return; }
       S.thesis = t; S.thesisVisual = visual; log('thesis_loaded', { source: src === 'upload' && t === ta.value.trim() ? 'upload' : 'paste', fileName: fname, chars: t.length, hash: await hashText(t), visualMediaType: visual ? visual.mediaType : null }); save(); render(); } })))));
@@ -464,14 +469,14 @@ function chatColumn(name) {
     try {
       const mediaType = visualFileMediaType(f); const existingBytes = S.chats[name].reduce((total, m) => total + (m.attachment && m.attachment.visual ? m.attachment.visual.bytes || 0 : 0), 0);
       const text = (await readFileText(f)).trim(); const id = mediaType ? await storeVisualFile(f, existingBytes) : null;
-      const attachment = { name: f.name, chars: text.length, text, ...(id ? { visual: { id, name: f.name, mediaType, bytes: f.size } } : {}) };
+      const attachment = { name: f.name, chars: text.length, text, ...(isPdfFile(f) ? { pdf: true } : {}), ...(id ? { visual: { id, name: f.name, mediaType, bytes: f.size } } : {}) };
       ui.chat.pending = attachment;
       chip.replaceChildren(h('span', { class: 'att', text: attachmentLabel(attachment) }), ' ', h('button', { style: 'padding:0 6px;font-size:12px', text: '×', onclick: async () => { ui.chat.pending = null; if (attachment.visual) await deleteVisualFile(attachment.visual.id).catch(() => {}); chip.textContent = ''; } }));
     } catch (e) { chip.textContent = 'Could not read or store file: ' + e.message; }
   });
   const doSend = () => { const t = input.value.trim(); const att = ui.chat.pending; if ((!t && !att) || ui.chat.busy) return; input.value = ''; ui.chat.pending = null; chip.textContent = ''; sendUserMessage(name, t, 'typed', null, att); };
   send.addEventListener('click', doSend); input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); } });
-  const hint = name === 'baseline' ? h('div', { class: 'hint', style: 'padding:10px 14px;border-bottom:1px solid var(--line);font-size:14px', text: 'Use this chat as you normally would to reflect on your thesis with an AI chat. You can think about the whole thesis or individual parts, ask questions, examine your ideas, or discuss uncertainties. Choose for yourself what to discuss and how. Upload your thesis with 📎 (.pdf, .txt, .md, .png, .jpg, .jpeg, .gif, .webp) or paste the relevant text. PDF text is extracted in the browser; supported image files are sent for visual analysis.' }) : null;
+  const hint = name === 'baseline' ? h('div', { class: 'hint', style: 'padding:10px 14px;border-bottom:1px solid var(--line);font-size:14px', text: 'Use this chat as you normally would to reflect on your thesis with an AI chat. You can think about the whole thesis or individual parts, ask questions, examine your ideas, or discuss uncertainties. Choose for yourself what to discuss and how. Upload your thesis with 📎 (.pdf, .txt, .md, .png, .jpg, .jpeg, .gif, .webp) or paste the relevant text. Only the text of a PDF is extracted in the browser; figures and layout are not included. Supported image files are sent for visual analysis.' }) : null;
   return h('section', { class: 'col' }, ...[h('h2', { text: 'Chat' }), hint, list, name === 'baseline' ? h('div', { style: 'padding:0 10px' }, chip, fileIn) : null, h('div', { class: 'composer' }, ...[attBtn, input, send].filter(Boolean))].filter(Boolean));
 }
 function setBusy(b) { ui.chat.busy = b; ui.chat.send.disabled = b; ui.chat.input.disabled = b; }
@@ -491,7 +496,7 @@ async function runAssistant(name) {
       if (name === 'prompt' && m.role === 'user' && !thesisVisualSent && S.thesisVisual) { extraVisual = S.thesisVisual; thesisVisualSent = true; }
       messages.push({ role: m.role, content: await messageContent(m.content, m.attachment, extraVisual) });
     }
-    const r = await callMammouth({ system: systemBlocks(name === 'baseline' ? 'baseline' : 'chat'), messages, maxTokens: C.MAX_TOKENS_CHAT, webSearch: name === 'prompt' && !!(C.WEB_SEARCH && C.WEB_SEARCH.prompt), onStatus: (s) => { if (el.dataset.started !== '1') el.textContent = '… ' + s; }, onDelta: (t) => { el.dataset.started = '1'; el.textContent = t; chat.list.scrollTop = chat.list.scrollHeight; } });
+    const r = await callMammouth({ system: systemBlocks(name === 'baseline' ? 'baseline' : 'chat'), messages, maxTokens: C.MAX_TOKENS_CHAT, webSearch: name === 'prompt' && !!(C.WEB_SEARCH && C.WEB_SEARCH.prompt), onStatus: (s) => { el.textContent = '… ' + s; }, onDelta: (t) => { el.textContent = t; chat.list.scrollTop = chat.list.scrollHeight; } });
     const msg = { role: 'assistant', content: r.text, t: nowIso(), latencyMs: Date.now() - t0, stop: r.stop, webSearches: r.searches }; S.chats[name].push(msg);
     S.usage.push({ t: msg.t, kind: 'chat_' + name, ...r.usage }); log('chat_assistant', { chars: r.text.length, latencyMs: msg.latencyMs, stop: r.stop, webSearches: r.searches });
   } catch (e) {
@@ -529,7 +534,7 @@ function questionsColumn() {
   ui.renderCards = renderCards;
   function renderCards() { body.replaceChildren(); ui.cards = {}; S.questions.forEach((q, i) => { const c = questionCard(q, i + 1); ui.cards[q.id] = c; body.append(c); }); updateCounts(); }
   renderCards();
-  return h('section', { class: 'col' }, h('h2', { text: 'Fragen' }), h('div', { style: 'padding:10px 14px;border-bottom:1px solid var(--line)' },
+  return h('section', { class: 'col' }, h('h2', { text: 'Questions' }), h('div', { style: 'padding:10px 14px;border-bottom:1px solid var(--line)' },
     h('p', { class: 'hint', text: 'The goal is to reflect on your thesis and the decisions you have made. Generate questions about relevant passages, discuss them in the chat, mark them as "Discussed" or "For later", or dismiss them with a suitable reason.' }),
     h('div', { class: 'row' }, gen, h('span', { class: 'spacer' })), msg, counts), body);
 }

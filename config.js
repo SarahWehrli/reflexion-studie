@@ -1,10 +1,8 @@
 // ===== Study settings - edit here, not in app.js =====
 window.CONFIG = {
-  MODEL: "deepseek-v4.1-flash", // Mammouth model ID (recorded in the log)
+  MODEL: "deepseek-v4.1-flash", // Mammouth model ID, used for all parts and all participants
   PHASE_MINUTES: 15,            // Suggested time per chat part (soft timer; does not end the part)
   PROMPT_VERSION: "v2-openalex", // Increment this whenever the prompt changes
-  EFFORT: "medium",             // low | medium | high - applies to both parts
-  THINKING: null,               // null = default adaptive thinking. "between_tools" = no upfront thinking (faster)
   // max_tokens includes thinking and response tokens. Too low can result in an empty response.
   MAX_TOKENS_CHAT: 16000,
   MAX_TOKENS_GENERATE: 32000,
@@ -17,8 +15,8 @@ window.CONFIG = {
 
   // Questionnaire links (one per part). Leave empty to show no button.
   QUESTIONNAIRE: {
-    after_baseline: "",
-    after_prompt: "",
+    after_baseline: "https://forms.cloud.microsoft/Pages/ResponsePage.aspx?id=WS4mp1YbWk-kEm8HGB9I7ssD6n7TaHtEkyUsotYIQrdUODNRTlpDUVpSSUNRUlUyNU1DUVpWQVkyUy4u",
+    after_prompt: "https://forms.cloud.microsoft/Pages/ResponsePage.aspx?id=WS4mp1YbWk-kEm8HGB9I7ssD6n7TaHtEkyUsotYIQrdUNTRaSERLRTdRWllVUkgzN1Q0Nk1NN1FBWS4u",
     after_pair: ""
   },
 
