@@ -2,7 +2,7 @@
 window.CONFIG = {
   MODEL: "deepseek-v4.1-flash", // Mammouth model ID, used for all parts and all participants
   PHASE_MINUTES: 15,            // Suggested time per chat part (soft timer; does not end the part)
-  PROMPT_VERSION: "v2-openalex", // Increment this whenever the prompt changes
+  PROMPT_VERSION: "v3-openalex-focus2", // Increment this whenever the prompt changes
   // max_tokens includes thinking and response tokens. Too low can result in an empty response.
   MAX_TOKENS_CHAT: 16000,
   MAX_TOKENS_GENERATE: 32000,
@@ -76,5 +76,6 @@ The quote must appear exactly in the thesis text. Return 5 to 8 items covering d
 
   // Additional instructions for the free chat in Part 2 (no JSON).
   CHAT_INSTRUCTION:
-`In the chat, respond in normal prose (not JSON). Follow the role described above. If the student wants to explore one of your questions further, engage with it without immediately giving away the answer.`
+`In the chat, respond in normal prose (not JSON). Follow the role described above. If the student wants to explore one of your questions further, engage with it without immediately giving away the answer.
+Use the OpenAlex search only for Focus 2, when a central decision seems to have had only one option and comparable published studies would help the student see alternatives. Do not search for clarifications, follow-up questions, Focus 1 or Focus 3, or when the student simply wants to discuss a question. Search at most once per decision; if you already showed studies for it, refer back to them instead of searching again.`
 };

@@ -158,7 +158,7 @@ async function callMammouth({ system, messages, maxTokens, onDelta, onStatus, we
     .concat(messages.map(message => ({ role: message.role, content: mammouthContent(message.content) })));
   const tools = webSearch ? [{ type: 'function', function: {
     name: 'search_openalex',
-    description: 'Search OpenAlex for published academic works. Use this for comparable studies and evidence relevant to the student\'s research decisions.',
+    description: 'Search OpenAlex for published academic works. Call this only for Focus 2 (Consider Alternatives), when you need two published studies that made a decision comparable to the student\'s. Do not call it for clarifications, follow-ups, Focus 1 or Focus 3, or when studies for this decision were already shown.',
     parameters: { type: 'object', properties: { query: { type: 'string', description: 'Focused academic search phrase' }, limit: { type: 'integer', minimum: 1, maximum: 5 } }, required: ['query'], additionalProperties: false }
   } }] : [];
   const searches = []; const usage = { input: 0, output: 0, cache_read: 0, cache_write: 0, web_searches: 0 };
