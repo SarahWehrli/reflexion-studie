@@ -3,7 +3,7 @@
 ## Before the study (one-time setup)
 1. Open `config.js` and replace the placeholder in `PROMPT_TEXT` with your system prompt.
 2. Optionally add questionnaire links under `QUESTIONNAIRE`.
-3. Create a Mammouth API key and confirm that your account has access to the `deepseek-v4.1-flash` model. OpenAlex searches require no key. Delete the Mammouth key after the final session.
+3. Create a Mammouth API key and confirm that your account has access to the `claude-sonnet-5-5` model. OpenAlex searches require no key. Delete the Mammouth key after the final session.
 
 ## For each session (researcher)
 1. Open the hosted page.
@@ -12,11 +12,11 @@
 4. At the end, the log is automatically downloaded as a JSON file to the Downloads folder. Check it, then select "Delete all local data on this device".
 
 ## What is recorded
-Chat interactions from Parts 1 and 2; generated questions and their passages; question statuses, dismissal reasons, and notes; changes made during the pair discussion; timestamps; and token usage. All sessions use the same model (`deepseek-v4.1-flash`). The API key is never recorded.
+Chat interactions from Parts 1 and 2; generated questions and their passages; question statuses, dismissal reasons, and notes; changes made during the pair discussion; timestamps; and token usage. All sessions use the same model (`claude-sonnet-5-5`). The API key is never recorded.
 
 Thesis text is included in the exported log only when the option is selected during setup. Otherwise, uploaded attachments include only the filename, character count, and image media type; the text is omitted. Original PDF and image bytes are never included in the export.
 
-In Part 2, DeepSeek can call the app's `search_openalex` function to search OpenAlex for published academic works. The app returns publication metadata and indexed abstracts, then sends those results back to DeepSeek for comparison. Full papers are not fetched; responses must distinguish abstract-only information from metadata-only records. Search calls and returned citations are included in the exported chat log. Searches are limited to four per response and five works per query.
+In Part 2, Claude can call the app's `search_openalex` function to search OpenAlex for published academic works. The app returns publication metadata and indexed abstracts, then sends those results back to Claude for comparison. Full papers are not fetched; responses must distinguish abstract-only information from metadata-only records. Search calls and returned citations are included in the exported chat log. Searches are limited to four per response and five works per query.
 
 ## Security
 The API key is held in memory only and is never stored in the log. It is cleared when the tab is closed or reloaded. After a reload, a session can be resumed by entering the key again; session state is stored in `localStorage`. Uploaded images are stored in browser `IndexedDB` so they can be sent again when resuming; "Delete all local data on this device" clears both stores.

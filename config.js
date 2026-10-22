@@ -1,11 +1,11 @@
 // ===== Study settings - edit here, not in app.js =====
 window.CONFIG = {
-  MODEL: "deepseek-v4.1-flash", // Mammouth model ID, used for all parts and all participants
+  MODEL: "claude-sonnet-5-5", // Mammouth model ID, used for all parts and all participants
   PHASE_MINUTES: 15,            // Suggested time per chat part (soft timer; does not end the part)
   PROMPT_VERSION: "v3-openalex-focus2", // Increment this whenever the prompt changes
   // max_tokens includes thinking and response tokens. Too low can result in an empty response.
-  MAX_TOKENS_CHAT: 16000,
-  MAX_TOKENS_GENERATE: 32000,
+  MAX_TOKENS_CHAT: 32000,
+  MAX_TOKENS_GENERATE: 64000,
 
   // Web search
   WEB_SEARCH: {

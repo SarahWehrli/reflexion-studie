@@ -333,7 +333,7 @@ function renderSetup(root) {
   const msg = h('div'); const info = (t, cls) => { msg.replaceChildren(h('div', { class: cls || 'hint', text: t })); };
   const testBtn = h('button', { text: 'Test key and connection', onclick: async () => {
     API_KEY = f.key.value.trim(); if (!API_KEY) return info('Enter the API key first.', 'err');
-    info('Testing ...'); try { await callMammouth({ system: 'Reply only with the word ok.', messages: [{ role: 'user', content: 'Test' }], maxTokens: 2000 }); info('Connection successful (Mammouth API and model).', 'hint'); } catch (e) { info(e.message, 'err'); }
+    info('Testing ...'); try { await callMammouth({ system: 'Reply only with the word ok.', messages: [{ role: 'user', content: 'Test' }], maxTokens: 8000 }); info('Connection successful (Mammouth API and model).', 'hint'); } catch (e) { info(e.message, 'err'); }
   } });
   const start = h('button', { class: 'primary', text: 'Start session', onclick: async () => {
     API_KEY = f.key.value.trim(); const id = f.id.value.trim();
@@ -519,7 +519,9 @@ function questionsColumn() {
     log('generate_start', { round });
     try {
       const r = await callMammouth({ system: systemBlocks('generate'), messages: [{ role: 'user', content: await messageContent(userMsg, null, S.thesisVisual) }], maxTokens: C.MAX_TOKENS_GENERATE });
-      S.usage.push({ t: nowIso(), kind: 'generate', ...r.usage }); const items = parseQuestions(r.text); let found = 0;
+      S.usage.push({ t: nowIso(), kind: 'generate', ...r.usage }); let items;
+      try { items = parseQuestions(r.text); } catch (e) { throw r.stop === 'length' ? new Error('The response was cut off because the token limit was reached. Increase MAX_TOKENS_GENERATE in config.js.') : e; }
+      let found = 0;
       for (const it of items) {
         const loc = locate(S.thesis, it.passage); const q = { id: 'q' + (S.questions.length + 1), round, passage: String(it.passage || ''), question: it.question.trim(), type: String(it.type || ''), found: !!loc, start: loc ? loc[0] : null, end: loc ? loc[1] : null, overlap: false, status: 'open', reason: '', reasonText: '', createdAt: nowIso() };
         if (loc) { found++; q.overlap = S.questions.some(o => o.found && !o.overlap && o.start < q.end && q.start < o.end); }
