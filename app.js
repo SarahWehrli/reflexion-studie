@@ -349,6 +349,15 @@ function renderSetup(root) {
     API_KEY = f.key.value.trim(); if (!API_KEY) return info('Enter the API key first.', 'err');
     info('Testing ...'); try { await callMammouth({ system: 'Reply only with the word ok.', messages: [{ role: 'user', content: 'Test' }], maxTokens: 8000 }); info('Connection successful (Mammouth API and model).', 'hint'); } catch (e) { info(e.message, 'err'); }
   } });
+  const searchBtn = h('button', { text: 'Test search', onclick: async () => {
+    API_KEY = f.key.value.trim(); if (!API_KEY) return info('Enter the API key first.', 'err');
+    info('Testing search ...');
+    try {
+      const r = await callMammouth({ messages: [{ role: 'user', content: 'Use your search tool to find two published papers on reflection in higher education. Then list them.' }], maxTokens: 8000, webSearch: 'baseline' });
+      const hits = r.searches.reduce((n, x) => n + (x.works || x.sources || []).length, 0);
+      info(r.searches.length ? 'Search works: the model searched ' + r.searches.length + ' time(s) and received ' + hits + ' result(s).' : 'The model did NOT use the search tool. Mammouth probably does not pass tools to ' + C.MODEL + '. Model reply: ' + r.text.slice(0, 200), r.searches.length ? 'hint' : 'err');
+    } catch (e) { info(e.message, 'err'); }
+  } });
   const start = h('button', { class: 'primary', text: 'Start session', onclick: async () => {
     API_KEY = f.key.value.trim(); const id = f.id.value.trim();
     if (!id) return info('Enter the participant ID.', 'err'); if (!API_KEY) return info('Enter the API key.', 'err');
@@ -366,7 +375,7 @@ function renderSetup(root) {
     h('label', {}, 'Participant ID'), f.id, h('label', {}, 'Pair ID (optional)'), f.pair,
     h('label', {}, 'API key ', h('span', { class: 'hint', text: '(kept in memory only; never stored or logged)' })), f.key,
     h('label', { style: 'font-weight:400;display:flex;gap:8px;align-items:center' }, f.incl, 'Include uploaded/pasted thesis text in the exported log (otherwise only the filename and length are saved)'),
-    h('div', { class: 'row', style: 'margin-top:14px' }, testBtn, start), msg)));
+    h('div', { class: 'row', style: 'margin-top:14px' }, testBtn, searchBtn, start), msg)));
 }
 function buildSteps(order) {
   const seq = order === 'AB' ? ['baseline', 'prompt'] : ['prompt', 'baseline'];
