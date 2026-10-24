@@ -152,16 +152,28 @@ async function searchOpenAlex(query, limit) {
   }));
   return { query, works };
 }
+// Collects cited URLs from the stream; providers report them in different fields.
+function collectWebSources(event, sources) {
+  const add = (url, title) => { if (typeof url === 'string' && url && !sources.has(url)) sources.set(url, { url, title: title || null }); };
+  for (const url of event.citations || []) add(url);
+  const choice = event.choices && event.choices[0]; const delta = (choice && (choice.delta || choice.message)) || {};
+  for (const a of delta.annotations || []) if (a.url_citation) add(a.url_citation.url, a.url_citation.title);
+  const extra = delta.provider_specific_fields || {};
+  for (const c of [].concat(extra.citations || []).flat()) if (c) add(c.url, c.title);
+}
 async function callMammouth({ system, messages, maxTokens, onDelta, onStatus, webSearch }) {
   if (!API_KEY) throw new Error('No API key in memory. Reload the page and enter the key.');
   const requestMessages = (system ? [{ role: 'system', content: mammouthContent(system) }] : [])
     .concat(messages.map(message => ({ role: message.role, content: mammouthContent(message.content) })));
-  const tools = webSearch ? [{ type: 'function', function: {
+  const nativeSearch = !!webSearch && C.WEB_SEARCH.provider === 'web';
+  const tools = webSearch && !nativeSearch ? [{ type: 'function', function: {
     name: 'search_openalex',
-    description: 'Search OpenAlex for published academic works. Call this only for Focus 2 (Consider Alternatives), when you need two published studies that made a decision comparable to the student\'s. Do not call it for clarifications, follow-ups, Focus 1 or Focus 3, or when studies for this decision were already shown.',
+    description: webSearch === 'baseline'
+      ? 'Searches OpenAlex for published academic works and returns their metadata and abstracts.'
+      : 'Search OpenAlex for published academic works. Call this only for Focus 2 (Consider Alternatives), when you need two published studies that made a decision comparable to the student\'s. Do not call it for clarifications, follow-ups, Focus 1 or Focus 3, or when studies for this decision were already shown.',
     parameters: { type: 'object', properties: { query: { type: 'string', description: 'Focused academic search phrase' }, limit: { type: 'integer', minimum: 1, maximum: 5 } }, required: ['query'], additionalProperties: false }
   } }] : [];
-  const searches = []; const usage = { input: 0, output: 0, cache_read: 0, cache_write: 0, web_searches: 0 };
+  const searches = []; const webSources = new Map(); const usage = { input: 0, output: 0, cache_read: 0, cache_write: 0, web_searches: 0 };
   let text = '', stop = null, toolCallCount = 0;
   for (;;) {
     let res;
@@ -169,7 +181,7 @@ async function callMammouth({ system, messages, maxTokens, onDelta, onStatus, we
       res = await fetch(API_URL, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: 'Bearer ' + API_KEY },
-        body: JSON.stringify({ model: C.MODEL, max_tokens: maxTokens, messages: requestMessages, stream: true, stream_options: { include_usage: true }, ...(webSearch ? { tools, tool_choice: 'auto' } : {}) })
+        body: JSON.stringify({ model: C.MODEL, max_tokens: maxTokens, messages: requestMessages, stream: true, stream_options: { include_usage: true }, ...(nativeSearch ? { web_search_options: { search_context_size: 'medium' } } : tools.length ? { tools, tool_choice: 'auto' } : {}) })
       });
     } catch (e) { throw new Error('Network error or blocked by the browser (CORS). See the "Local server" section in README.'); }
     if (!res.ok) { let m = ''; try { const j = await res.json(); m = (j.error && j.error.message) || ''; } catch (e) { /* ignorieren */ } throw apiError(res.status, m); }
@@ -181,7 +193,8 @@ async function callMammouth({ system, messages, maxTokens, onDelta, onStatus, we
         const data = line.slice(5).trim(); if (!data || data === '[DONE]') continue;
         let event; try { event = JSON.parse(data); } catch (e) { continue; }
         if (event.error) throw new Error('API stream error: ' + (event.error.message || 'unknown'));
-        if (event.usage) { usage.input += event.usage.prompt_tokens || 0; usage.output += event.usage.completion_tokens || 0; }
+        if (event.usage) { usage.input += event.usage.prompt_tokens || 0; usage.output += event.usage.completion_tokens || 0; if (event.usage.server_tool_use) usage.web_searches += event.usage.server_tool_use.web_search_requests || 0; }
+        if (nativeSearch) collectWebSources(event, webSources);
         const choice = event.choices && event.choices[0]; if (!choice) continue;
         const delta = choice.delta || {};
         const before = roundText.length;
@@ -226,6 +239,7 @@ async function callMammouth({ system, messages, maxTokens, onDelta, onStatus, we
     }
     if (onStatus) onStatus('reading sources ...');
   }
+  if (webSources.size) searches.push({ provider: 'web', sources: [...webSources.values()] });
   text = text.replace(/^\n+/, '');
   if (!text.trim()) throw new Error(stop === 'length' ? 'Empty response: the token limit was reached. Increase MAX_TOKENS in config.js.' : 'Empty response from the API (' + (stop || 'unknown') + ').');
   return { text, usage, stop, searches };
@@ -496,7 +510,7 @@ async function runAssistant(name) {
       if (name === 'prompt' && m.role === 'user' && !thesisVisualSent && S.thesisVisual) { extraVisual = S.thesisVisual; thesisVisualSent = true; }
       messages.push({ role: m.role, content: await messageContent(m.content, m.attachment, extraVisual) });
     }
-    const r = await callMammouth({ system: systemBlocks(name === 'baseline' ? 'baseline' : 'chat'), messages, maxTokens: C.MAX_TOKENS_CHAT, webSearch: name === 'prompt' && !!(C.WEB_SEARCH && C.WEB_SEARCH.prompt), onStatus: (s) => { el.textContent = '… ' + s; }, onDelta: (t) => { el.textContent = t; chat.list.scrollTop = chat.list.scrollHeight; } });
+    const r = await callMammouth({ system: systemBlocks(name === 'baseline' ? 'baseline' : 'chat'), messages, maxTokens: C.MAX_TOKENS_CHAT, webSearch: C.WEB_SEARCH && C.WEB_SEARCH[name] ? name : false, onStatus: (s) => { el.textContent = '… ' + s; }, onDelta: (t) => { el.textContent = t; chat.list.scrollTop = chat.list.scrollHeight; } });
     const msg = { role: 'assistant', content: r.text, t: nowIso(), latencyMs: Date.now() - t0, stop: r.stop, webSearches: r.searches }; S.chats[name].push(msg);
     S.usage.push({ t: msg.t, kind: 'chat_' + name, ...r.usage }); log('chat_assistant', { chars: r.text.length, latencyMs: msg.latencyMs, stop: r.stop, webSearches: r.searches });
   } catch (e) {
