@@ -9,7 +9,7 @@ window.CONFIG = {
 
   // Web search
   WEB_SEARCH: {
-    provider: "web",            // "web" = standard web search via Mammouth (web_search_options); "openalex" = app's OpenAlex search
+    provider: "openalex",       // "openalex" = app's OpenAlex search (works); "web" = web_search_options, which Mammouth ignored in testing
     prompt: true,               // Part 2: search available (the prompt restricts it to Focus 2)
     baseline: true              // Part 1: same search, no instructions, so only the prompt differs
   },
